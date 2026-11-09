@@ -14,7 +14,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_MCP_URL = "https://app.coinfello.com/api/mcp/mcp"
+DEFAULT_MCP_URL = "https://app.coinfello.com/api/mcp"
 ENV_URL_VAR = "COINFELLO_MCP_URL"
 PROVIDER = "coinfello"
 FALLBACK_FILE = Path(__file__).resolve().parent / ".coinfello-state.json"

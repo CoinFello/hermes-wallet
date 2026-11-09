@@ -36,6 +36,6 @@ provides_hooks:
   - pre_tool_call
 optional_env:
   - name: COINFELLO_MCP_URL
-    description: "CoinFello MCP endpoint (streamable HTTP). Default: https://app.coinfello.com/api/mcp/mcp"
+    description: "CoinFello MCP endpoint (streamable HTTP). Default: https://app.coinfello.com/api/mcp"
     prompt: "CoinFello MCP URL"
     password: false

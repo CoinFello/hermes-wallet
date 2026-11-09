@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -98,16 +99,40 @@ class CoinFelloMCP:
 
     def _post(self, payload: dict) -> tuple[int, dict, bytes]:
         body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            self.url, data=body, headers=self._headers(), method="POST"
-        )
-        try:
-            response = urllib.request.urlopen(request, timeout=self.timeout)
-        except urllib.error.HTTPError as error:
-            return error.code, dict(error.headers or {}), error.read() or b""
-        except (urllib.error.URLError, OSError, TimeoutError) as error:
-            raise MCPError(f"could not reach {self.url}: {error}") from error
-        return response.status, dict(response.headers), response.read() or b""
+        for _hop in range(3):
+            request = urllib.request.Request(
+                self.url, data=body, headers=self._headers(), method="POST"
+            )
+            try:
+                response = urllib.request.urlopen(request, timeout=self.timeout)
+            except urllib.error.HTTPError as error:
+                target = self._same_host_redirect(error)
+                if target:
+                    # 307/308 keep the method and body. The server moved the
+                    # endpoint (CoinFello's /api/mcp/mcp -> /api/mcp, a 308):
+                    # follow it, and remember it for every later call.
+                    self.url = target
+                    continue
+                return error.code, dict(error.headers or {}), error.read() or b""
+            except (urllib.error.URLError, OSError, TimeoutError) as error:
+                raise MCPError(f"could not reach {self.url}: {error}") from error
+            return response.status, dict(response.headers), response.read() or b""
+        raise MCPError(f"too many redirects from {self.url}")
+
+    def _same_host_redirect(self, error: urllib.error.HTTPError) -> str | None:
+        """The 307/308 target, only on the same scheme and host: the request
+        carries the session's bearer token, which must never follow a
+        redirect to another site."""
+        if error.code not in (307, 308):
+            return None
+        location = (error.headers or {}).get("Location")
+        if not location:
+            return None
+        target = urllib.parse.urljoin(self.url, location)
+        here, there = urllib.parse.urlsplit(self.url), urllib.parse.urlsplit(target)
+        if (here.scheme, here.netloc) != (there.scheme, there.netloc):
+            return None
+        return target.rstrip("/")
 
     def _parse_message(self, body: bytes, want_id):
         text = body.decode("utf-8", "replace").strip()

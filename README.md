@@ -59,7 +59,7 @@ and inventories under Capabilities → Plugins.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `COINFELLO_MCP_URL` | `https://app.coinfello.com/api/mcp/mcp` | MCP endpoint (streamable HTTP). Point it at a preview deployment to test there. |
+| `COINFELLO_MCP_URL` | `https://app.coinfello.com/api/mcp` | MCP endpoint (streamable HTTP). Point it at a preview deployment to test there. |
 
 Set it in `~/.hermes/.env` or the process environment. The plugin's session
 token is stored under `providers.coinfello` in the profile's `auth.json` —
