@@ -47,9 +47,10 @@ class NeedsTradingAccess(Exception):
 
     MESSAGE = (
         "This CoinFello session is read-only, so it cannot move funds. Nothing "
-        "was sent. To trade, call coinfello_connect: it starts a new browser "
-        "sign-in where the human picks a daily limit. Send its user_message to "
-        "the human exactly as written, then poll coinfello_poll_approval."
+        "was sent. To trade, ask the human for a daily limit and call "
+        "coinfello_set_daily_limit (they approve it in their browser, same "
+        "session); on servers without it, call coinfello_connect for a new "
+        "browser sign-in. Send the returned user_message exactly as written."
     )
 
     def __init__(self) -> None:
@@ -229,10 +230,14 @@ def sign_in_steps(code: str, url: str, *, upgrade: bool = False) -> list[str]:
         f"When the page asks for your agent's code, type: {code}",
     ]
     if offers_access_choice():
+        adjustable = can_adjust_limit()
         steps.append(
             "Choose what your agent may do: Read only, or trade up to a daily "
-            "limit ($50, $250 or $1,000)."
+            + ("limit ($50, $250, $1,000, or a custom amount)." if adjustable
+               else "limit ($50, $250 or $1,000).")
             + (" Pick a daily limit, since you're enabling trading." if upgrade else "")
+            + (" You can change it later from the CoinFello pane in Hermes, "
+               "without signing in again." if adjustable else "")
         )
     steps.append("Approve. Hermes picks up the sign-in on its own; nothing to paste back.")
     return steps
@@ -534,6 +539,10 @@ def status(*, live: bool = True) -> dict:
     # Carried while signed in so the pane can show the right sign-in form the
     # instant the user signs out (cached capability probe: no extra request).
     summary["sign_in_mode"] = sign_in_mode()
+    summary["can_adjust_limit"] = can_adjust_limit()
+    if state.get("pending_limit_change_id"):
+        summary["pending_limit_change_url"] = state.get("pending_limit_change_url") or ""
+        summary["pending_limit_requested"] = state.get("pending_limit_requested")
     if summary.get("pending_approval_id"):
         summary["sign_in_steps"] = sign_in_steps(
             summary["pending_user_code"], summary["pending_approval_url"],
@@ -559,8 +568,11 @@ def status(*, live: bool = True) -> dict:
     if summary.get("access") == "read_only":
         summary["next"] = (
             "Read-only session: reads and quotes work, trades are refused. To "
-            "trade, call coinfello_connect (it starts the upgrade) and send its "
-            "user_message to the human exactly as written."
+            + ("trade, call coinfello_set_daily_limit with the human's chosen "
+               "daily limit (they approve it in their browser; no new sign-in)."
+               if summary.get("can_adjust_limit") else
+               "trade, call coinfello_connect (it starts the upgrade) and send its "
+               "user_message to the human exactly as written.")
         )
     return summary
 
@@ -700,3 +712,139 @@ def embed_token(scope: str = "swap") -> dict:
         "expires_at": result.get("expires_at"),
         "embed_url": result.get("embed_url") or app_url("/embed/swap"),
     }
+
+
+# -- daily limit: lower here, raise with the human's browser approval ---------
+#
+# The agent holds the same session token this backend does, so anything the
+# token can do the agent can do. The server therefore lets the token only
+# LOWER the limit (set_daily_limit); a raise, or read-only -> trading, is a
+# change the human approves on CoinFello in their own browser
+# (start_limit_change), and the session keeps its token either way.
+
+def can_adjust_limit() -> bool:
+    return supports("set_daily_limit") and supports("start_limit_change")
+
+
+def _parse_limit(limit_usd: Any) -> float | None:
+    """None means read only; otherwise a positive dollar amount (cents)."""
+    if limit_usd is None or (isinstance(limit_usd, str) and limit_usd.strip().lower() in ("", "read_only", "none")):
+        return None
+    try:
+        value = round(float(str(limit_usd).replace("$", "").replace(",", "").strip()), 2)
+    except ValueError as exc:
+        raise ValueError("the limit is a dollar amount, e.g. 500, or read_only") from exc
+    if not value > 0:
+        raise ValueError("the daily limit must be more than $0 (or read_only)")
+    return value
+
+
+def _current_limit(state: dict) -> float | None:
+    """The session's limit: None for read-only, a number when trading."""
+    if state.get("access") == "trade":
+        return float(state.get("daily_limit_usd") or 0)
+    return None
+
+
+def _store_access(result: dict) -> dict:
+    access = _access_fields(result)
+    if access:
+        save_state(access)
+    return access
+
+
+def _limit_text(limit: float | None) -> str:
+    return "read only" if limit is None else f"${limit:,.2f}".replace(".00", "") + " a day"
+
+
+def change_daily_limit(limit_usd: Any) -> dict:
+    """Set the daily limit. Lowering (or read-only) applies at once; a raise
+    returns an approval link for the human, and the session is unchanged
+    until they approve it."""
+    if not can_adjust_limit():
+        raise RuntimeError(
+            "This CoinFello server cannot change a session's limit yet; sign in "
+            "again to pick a different one (coinfello_connect)."
+        )
+    new = _parse_limit(limit_usd)
+    state = load_state()
+    current = _current_limit(state)
+    lowering = new is None or (current is not None and new <= current)
+    if lowering:
+        try:
+            result = call("set_daily_limit", {"limit_usd": new}, timeout=20.0)
+        except ToolError as exc:
+            if "raise_needs_approval" not in str(exc):
+                raise
+            lowering = False  # our cached limit was stale: the server decides
+        else:
+            if not isinstance(result, dict):
+                raise RuntimeError(_text(result))
+            _store_access(result)
+            out = {"ok": True, "status": "changed", **_access_summary(load_state())}
+            for key in ("spent_today_usd", "remaining_today_usd"):
+                if result.get(key) is not None:
+                    out[key] = result[key]
+            out["user_message"] = f"Done: your agent's limit is now {_limit_text(new)}. No new sign-in needed."
+            return out
+
+    result = call("start_limit_change", {"limit_usd": new}, timeout=20.0)
+    if not isinstance(result, dict) or not result.get("approval_url"):
+        raise RuntimeError(_text(result))
+    save_state(
+        {
+            "pending_limit_change_id": result.get("change_id") or "",
+            "pending_limit_change_url": result["approval_url"],
+            "pending_limit_requested": new,
+        }
+    )
+    return {
+        "ok": True,
+        "status": "approval_required",
+        "approval_url": result["approval_url"],
+        "change_id": result.get("change_id"),
+        "requested": result.get("requested"),
+        "expires_in_seconds": result.get("expires_in_seconds"),
+        "user_message": (
+            f"To raise your agent's limit to {_limit_text(new)}, open "
+            f"{result['approval_url']} in your regular browser and approve it "
+            "(sign in to CoinFello first if it asks). You keep the same "
+            "session: no new sign-in or code. The link expires in 10 minutes."
+        ),
+        "next": (
+            "Send user_message to the human exactly as written. Do not open the "
+            "link yourself. Then call coinfello_limit_status every 5-10 seconds."
+        ),
+    }
+
+
+def poll_limit_change() -> dict:
+    """Finish a pending raise once the human has approved it in the browser."""
+    state = load_state()
+    change_id = state.get("pending_limit_change_id") or ""
+    if not change_id:
+        return {"ok": True, "status": "none", **_access_summary(state)}
+    result = call("get_limit_change", {"change_id": change_id}, timeout=20.0)
+    if not isinstance(result, dict):
+        raise RuntimeError(_text(result))
+    status = result.get("status")
+    if status == "pending":
+        return {"ok": True, "status": "pending"}
+    cancel_limit_change()
+    if status == "approved":
+        _store_access(result)
+        summary = _access_summary(load_state())
+        return {
+            "ok": True,
+            "status": "approved",
+            **summary,
+            "user_message": f"Approved: your agent can now trade up to {_limit_text(_current_limit(load_state()))}.",
+        }
+    return {"ok": True, "status": status or "expired", **_access_summary(load_state())}
+
+
+def cancel_limit_change() -> dict:
+    save_state(
+        {"pending_limit_change_id": "", "pending_limit_change_url": "", "pending_limit_requested": None}
+    )
+    return {"ok": True}

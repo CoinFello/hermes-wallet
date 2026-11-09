@@ -94,6 +94,16 @@ def _disconnect(args: dict) -> Any:
     return core.disconnect()
 
 
+def _set_daily_limit(args: dict) -> Any:
+    if "limit_usd" not in args:
+        raise ValueError("limit_usd is required: a dollar amount, or null for read only")
+    return core.change_daily_limit(args.get("limit_usd"))
+
+
+def _limit_status(args: dict) -> Any:
+    return core.poll_limit_change()
+
+
 def _chat(args: dict) -> Any:
     payload = {"message": str(args.get("message") or "").strip()}
     if not payload["message"]:
@@ -228,6 +238,38 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             {"approval_id": {**_STRING, "description": "approval_id from coinfello_connect (default: the pending one)"}},
         ),
         _poll_approval,
+    ),
+    (
+        "coinfello_set_daily_limit",
+        _schema(
+            "coinfello_set_daily_limit",
+            "Change how much the agent may trade per day, or make the session "
+            "read-only (limit_usd null). Same session, no new sign-in. Lowering "
+            "applies at once. Raising (including read-only -> trading) only "
+            "returns an approval link: the human approves it on CoinFello in "
+            "their own browser, so the agent can never raise its own limit. "
+            "Only call this with an amount the human asked for. Send the "
+            "returned user_message to the human exactly as written; for a raise, "
+            "then call coinfello_limit_status every 5-10 seconds.",
+            {
+                "limit_usd": {
+                    "type": ["number", "null"],
+                    "description": "New daily limit in USD (any positive amount), or null for read only",
+                },
+            },
+            ("limit_usd",),
+        ),
+        _set_daily_limit,
+    ),
+    (
+        "coinfello_limit_status",
+        _schema(
+            "coinfello_limit_status",
+            "Check on a daily-limit raise the human is approving in their "
+            "browser: pending, approved (with the new limit), denied or expired.",
+            {},
+        ),
+        _limit_status,
     ),
     (
         "coinfello_disconnect",

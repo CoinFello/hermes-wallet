@@ -161,3 +161,21 @@ def test_send_validation_errors_fold_into_ok_false(client, mock_mcp):
     assert bad.status_code == 200
     assert bad.json()["ok"] is False
     assert "0x address" in bad.json()["error"]
+
+
+def test_limit_routes_over_http(client, mock_mcp):
+    mock_mcp.mock_state.update(browser_sign_in=True, actions=True, access_mode=True, limit_mode=True)
+    core.save_state({"session_token": "tok-trade", "wallet_address": "0xWALLET"})
+    client.get(f"{BASE}/status")
+
+    lowered = client.post(f"{BASE}/limit", json={"limit_usd": 100})
+    assert lowered.status_code == 200, lowered.text
+    assert lowered.json()["status"] == "changed"
+
+    raised = client.post(f"{BASE}/limit", json={"limit_usd": 9000})
+    assert raised.json()["status"] == "approval_required"
+    assert client.post(f"{BASE}/limit/poll").json()["status"] == "pending"
+    assert client.post(f"{BASE}/limit/cancel").json()["ok"] is True
+
+    read_only = client.post(f"{BASE}/limit", json={"limit_usd": None})
+    assert read_only.json()["access"] == "read_only"

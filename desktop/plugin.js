@@ -645,23 +645,113 @@ function PendingSignIn({ ctx, status, refresh, upgrade }) {
   })
 }
 
-// Read-only vs trading with a daily limit, and the way
-// from one to the other.
+// The session's access and its daily limit, adjustable in
+// place: lowering applies at once; a raise (or read-only -> trading) opens a
+// one-click approval on CoinFello in the browser. Same session either way.
+const LIMIT_PRESETS = [50, 250, 1000]
+
+const money = (value) => `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+
+function LimitEditor({ current, busy, onSave, onCancel }) {
+  const preset = current != null && LIMIT_PRESETS.includes(current)
+  const [choice, setChoice] = useState(current == null ? 'read' : preset ? String(current) : 'custom')
+  const [custom, setCustom] = useState(current != null && !preset ? String(current) : '')
+  const isCustom = choice === 'custom'
+  const value = choice === 'read' ? null : isCustom ? Number(custom) : Number(choice)
+  const valid = choice === 'read' || (Number.isFinite(value) && value > 0)
+  const raising = value != null && (current == null || value > current)
+
+  const option = (key, label) =>
+    jsx(Button, {
+      key,
+      type: 'button',
+      size: 'sm',
+      variant: choice === key ? 'secondary' : 'outline',
+      onClick: () => setChoice(key),
+      children: label,
+    })
+
+  return jsxs('form', {
+    className: 'flex flex-col gap-2',
+    onSubmit: (event) => {
+      event.preventDefault()
+      if (valid && !busy) onSave(value)
+    },
+    children: [
+      jsxs('div', {
+        className: 'flex flex-wrap gap-1',
+        children: [
+          option('read', 'Read only'),
+          ...LIMIT_PRESETS.map((amount) => option(String(amount), `${money(amount)}/day`)),
+          option('custom', 'Custom'),
+        ],
+      }),
+      isCustom
+        ? jsx(Input, { value: custom, inputMode: 'decimal', autoFocus: true, placeholder: 'Daily limit in USD, e.g. 500', onChange: (e) => setCustom(e.target.value.replace(/[^0-9.]/g, '')) })
+        : null,
+      jsx('div', {
+        className: cn('text-[0.6875rem]', muted),
+        children: raising
+          ? 'Raising opens a one-click approval on CoinFello in your browser. Same session, no new sign-in.'
+          : 'Applies right away. Same session, no new sign-in.',
+      }),
+      jsxs('div', {
+        className: 'flex gap-2',
+        children: [
+          jsx(Button, { type: 'submit', size: 'sm', loading: busy, disabled: !valid, children: raising ? 'Continue in browser' : 'Save' }),
+          jsx(Button, { type: 'button', size: 'sm', variant: 'ghost', onClick: onCancel, children: 'Cancel' }),
+        ],
+      }),
+    ],
+  })
+}
+
 function AccessBadge({ ctx, status, refresh }) {
+  const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  if (!status.access || status.access === 'unknown') return null
+  const [notice, setNotice] = useState('')
+  const pendingUrl = status.pending_limit_change_url
 
-  const enableTrading = async () => {
+  // A raise waiting on the human's browser approval: poll until it settles.
+  useEffect(() => {
+    if (!pendingUrl) return undefined
+    const timer = setInterval(async () => {
+      try {
+        const result = await ctx.rest('/limit/poll', { method: 'POST', body: {} })
+        if (!result || result.status === 'pending') return
+        if (result.status === 'approved') setNotice(result.user_message || 'Limit updated.')
+        else if (result.status === 'denied') setNotice('The change was denied. Your limit is unchanged.')
+        else if (result.status === 'expired') setNotice('The approval link expired. Your limit is unchanged.')
+        refresh()
+      } catch {
+        // transient: keep polling
+      }
+    }, 5000)
+    return () => clearInterval(timer)
+  }, [pendingUrl, ctx, refresh])
+
+  if (!status.access || status.access === 'unknown') return null
+  const current = status.access === 'trade' ? Number(status.daily_limit_usd) : null
+
+  const save = async (limit) => {
     setBusy(true)
     setError('')
+    setNotice('')
     try {
-      const result = await ctx.rest('/connect', { method: 'POST', body: {} })
-      if (!result || result.ok === false) setError(errorOf(result, 'Could not start sign-in'))
-      else {
-        ctx.os.openExternal(result.approval_url)
-        refresh()
+      // Servers without adjustable limits: the only way to trade is a new sign-in.
+      if (!status.can_adjust_limit) {
+        const result = await ctx.rest('/connect', { method: 'POST', body: {} })
+        if (!result || result.ok === false) setError(errorOf(result, 'Could not start sign-in'))
+        else ctx.os.openExternal(result.approval_url)
+      } else {
+        const result = await ctx.rest('/limit', { method: 'POST', body: { limit_usd: limit } })
+        if (!result || result.ok === false) setError(errorOf(result, 'Could not change the limit'))
+        else if (result.status === 'approval_required') ctx.os.openExternal(result.approval_url)
+        else setNotice(result.user_message || 'Limit updated.')
       }
+      setEditing(false)
+      refresh()
     } catch (exc) {
       setError(String(exc))
     } finally {
@@ -669,19 +759,15 @@ function AccessBadge({ ctx, status, refresh }) {
     }
   }
 
-  if (status.access === 'trade') {
-    const left = status.remaining_today_usd
-    return jsxs('div', {
-      className: cn(row, 'text-[0.6875rem]', muted),
-      children: [
-        jsxs('span', {
-          className: 'flex items-center gap-1.5',
-          children: [jsx(StatusDot, { tone: 'good' }), `Trading · up to $${status.daily_limit_usd}/day`],
-        }),
-        left != null ? jsx('span', { children: `$${Number(left).toFixed(2)} left today` }) : null,
-      ],
-    })
+  const cancelPending = async () => {
+    await ctx.rest('/limit/cancel', { method: 'POST', body: {} })
+    refresh()
   }
+
+  const summary =
+    current == null
+      ? jsxs('span', { className: 'flex items-center gap-1.5 text-xs font-medium', children: [jsx(StatusDot, { tone: 'warn' }), 'Read-only'] })
+      : jsxs('span', { className: 'flex items-center gap-1.5 text-xs font-medium', children: [jsx(StatusDot, { tone: 'good' }), `Trading · up to ${money(current)}/day`] })
 
   return jsxs('div', {
     className: 'flex flex-col gap-1.5 rounded-md border border-(--ui-stroke-secondary) p-2',
@@ -689,17 +775,49 @@ function AccessBadge({ ctx, status, refresh }) {
       jsxs('div', {
         className: row,
         children: [
-          jsxs('span', {
-            className: 'flex items-center gap-1.5 text-xs font-medium',
-            children: [jsx(StatusDot, { tone: 'warn' }), 'Read-only'],
-          }),
-          jsx(Button, { size: 'sm', loading: busy, onClick: enableTrading, children: 'Enable trading' }),
+          summary,
+          !editing && !pendingUrl
+            ? jsx(Button, {
+                size: 'sm',
+                variant: current == null ? 'default' : 'ghost',
+                onClick: () => (status.can_adjust_limit ? setEditing(true) : save(null)),
+                children: current == null ? 'Enable trading' : 'Change limit',
+              })
+            : null,
         ],
       }),
-      jsx('div', {
-        className: cn('text-[0.6875rem]', muted),
-        children: 'Balances and quotes work. To send or swap, sign in again and pick a daily limit.',
-      }),
+      current != null && status.remaining_today_usd != null && !editing
+        ? jsx('div', { className: cn('text-[0.6875rem]', muted), children: `${money(status.remaining_today_usd)} left in the last 24 hours` })
+        : null,
+      current == null && !editing && !pendingUrl
+        ? jsx('div', { className: cn('text-[0.6875rem]', muted), children: 'Balances and quotes work. To send or swap, set a daily limit.' })
+        : null,
+      editing ? jsx(LimitEditor, { current, busy, onSave: save, onCancel: () => setEditing(false) }) : null,
+      pendingUrl
+        ? jsxs('div', {
+            className: 'flex flex-col gap-1.5',
+            children: [
+              jsx('div', {
+                className: cn('text-xs', muted),
+                children: `Approve ${status.pending_limit_requested == null ? 'read-only' : `${money(status.pending_limit_requested)}/day`} on CoinFello in your browser (sign in there first if it asks).`,
+              }),
+              jsxs('div', {
+                className: row,
+                children: [
+                  jsx('span', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for approval…' }),
+                  jsxs('div', {
+                    className: 'flex gap-1',
+                    children: [
+                      jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(pendingUrl), children: 'Reopen' }),
+                      jsx(Button, { size: 'sm', variant: 'ghost', onClick: cancelPending, children: 'Cancel' }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          })
+        : null,
+      notice ? jsx('div', { className: cn('text-xs', up), children: notice }) : null,
       error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
     ],
   })

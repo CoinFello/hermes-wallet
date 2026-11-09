@@ -17,6 +17,8 @@ provides_tools:
   - coinfello_connect
   - coinfello_verify
   - coinfello_poll_approval
+  - coinfello_set_daily_limit
+  - coinfello_limit_status
   - coinfello_disconnect
   - coinfello_chat
   - coinfello_job_status

@@ -118,6 +118,9 @@ EMBED_TOKEN = {
 
 
 def _access_for(authorization, state):
+    override = state.get("access_override", {}).get(authorization)
+    if override is not None:
+        return dict(override)
     if authorization == "Bearer tok-trade":
         return {"access": "trade", "daily_limit_usd": 250,
                 "spent_today_usd": 40.5, "remaining_today_usd": 209.5}
@@ -204,12 +207,57 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 ]
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
+            if self.state["limit_mode"]:
+                tools += [{"name": name, "inputSchema": {"type": "object"}}
+                          for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
             if self.state["transfer_status"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in STATUS_TOOLS]
             self._json(200, _rpc_response(message.get("id"), {"tools": tools}))
             return
 
         self._json(400, {"error": f"unsupported method {method}"})
+
+    def _limit_tool(self, message_id, name, arguments):
+        """Mirrors coinfello-web: the token may only LOWER its own limit; a
+        raise is a pending change the human approves in the browser."""
+        state, auth = self.state, self.headers.get("Authorization")
+        current = _access_for(auth, state)
+        cur = current.get("daily_limit_usd") if current["access"] == "trade" else None
+
+        def access(limit):
+            return {"access": "read_only"} if limit is None else {
+                "access": "trade", "daily_limit_usd": limit,
+                "spent_today_usd": 0, "remaining_today_usd": limit}
+
+        if name == "set_daily_limit":
+            new = arguments.get("limit_usd")
+            if new is not None and (cur is None or new > cur):
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    "raise_needs_approval: a raise needs the human's approval; "
+                    "call start_limit_change.", error=True)))
+                return
+            state["access_override"][auth] = access(new)
+            self._json(200, _rpc_response(message_id, _tool_result(access(new))))
+        elif name == "start_limit_change":
+            state["limit_changes"]["chg-1"] = {
+                "auth": auth, "limit": arguments.get("limit_usd"), "status": "pending"}
+            self._json(200, _rpc_response(message_id, _tool_result({
+                "approval_url": "https://example.test/authorize/limit?change=chg-1",
+                "change_id": "chg-1", "expires_in_seconds": 600,
+                "current": {k: v for k, v in current.items() if k in ("access", "daily_limit_usd")},
+                "requested": access(arguments.get("limit_usd")),
+            })))
+        else:  # get_limit_change
+            change = state["limit_changes"].get(arguments.get("change_id"))
+            if change is None or change["auth"] != auth:
+                self._json(200, _rpc_response(message_id, _tool_result({"status": "expired"})))
+                return
+            if change["status"] == "approved":
+                state["access_override"][auth] = access(change["limit"])
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    {"status": "approved", **access(change["limit"])})))
+            else:
+                self._json(200, _rpc_response(message_id, _tool_result({"status": change["status"]})))
 
     def _handle_tool(self, message_id, name, arguments):
         state = self.state
@@ -226,6 +274,9 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             time.sleep(state["sign_out_delay"])
             state["signed_out_tokens"].append(self.headers.get("Authorization"))
             self._json(200, _rpc_response(message_id, _tool_result("Signed out.")))
+            return
+        if name in ("set_daily_limit", "start_limit_change", "get_limit_change") and state["limit_mode"]:
+            self._limit_tool(message_id, name, arguments)
             return
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
                 and state["access_mode"]
@@ -394,6 +445,10 @@ def mock_mcp(monkeypatch):
         # access ("tok-trade" here); whoami and refusals follow the token.
         "access_mode": False,
         "refused_read_only": [],
+        # Adjustable limits (the follow-up to access levels): off = servers without them.
+        "limit_mode": False,
+        "access_override": {},
+        "limit_changes": {},
         "sign_out_delay": 0.0,
         "signed_out_tokens": [],
         # Older servers have no send/swap/embed tools.

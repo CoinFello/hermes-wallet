@@ -128,3 +128,24 @@ def intent_execute(body: IntentBody):
 @router.post("/embed-token")
 def embed_token():
     return _safe(lambda: core.embed_token("swap"))
+
+
+class LimitBody(BaseModel):
+    """``limit_usd`` None means read only."""
+
+    limit_usd: Optional[float] = None
+
+
+@router.post("/limit")
+def limit(body: LimitBody):
+    return _safe(lambda: core.change_daily_limit(body.limit_usd))
+
+
+@router.post("/limit/poll")
+def limit_poll():
+    return _safe(core.poll_limit_change)
+
+
+@router.post("/limit/cancel")
+def limit_cancel():
+    return _safe(core.cancel_limit_change)
