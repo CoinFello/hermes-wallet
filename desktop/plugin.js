@@ -25,6 +25,7 @@ import {
   SelectTrigger,
   SelectValue,
   StatusDot,
+  ToggleRow,
   cn,
   useQuery,
   useQueryClient,
@@ -39,8 +40,10 @@ const ID = 'coinfello'
 // A hybrid of CoinFello's web UI and the user's Hermes theme. Hermes tokens
 // (--ui-text-*, --ui-stroke-*, --ui-widget-surface-background, --ui-green /
 // --ui-red, --font-sans / --font-mono) carry every surface, text and state
-// colour, so the pane follows whatever theme is active. CoinFello contributes
-// its brand: the yellow primary action and accents, the serif portfolio figure
+// colour, so the pane follows whatever theme is active. Actions and highlights
+// use the theme's accent (--dt-primary, as Hermes' own primary buttons do);
+// Settings > Appearance can switch them to CoinFello's yellow. CoinFello
+// also contributes the serif portfolio figure
 // (Libre Baskerville, as on app.coinfello.com, falling back to system serifs),
 // tabular figures, round token icons and rounded cards. The two brand colours
 // are the only literals, scoped to the pane like Hermes' own BrandMark tiles.
@@ -56,8 +59,13 @@ const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="1
 const STYLE_ID = 'coinfello-plugin-styles'
 const STYLES = `
 .cf {
+  /* Accent for actions and highlights: the Hermes theme's primary (what its
+     own primary buttons use) unless the user opts into CoinFello colors. */
+  --cf-accent: var(--dt-primary);
+  --cf-accent-ink: var(--dt-primary-foreground, #fff);
   --cf-brand: #ffee00;
   --cf-brand-ink: #1c1800;
+  --cf-warn: #e5b400;
   --cf-violet: #8556e5;
   --cf-radius: 12px;
   --cf-serif: 'Libre Baskerville', 'Noto Serif', 'DejaVu Serif', Georgia, serif;
@@ -66,23 +74,27 @@ const STYLES = `
   font-family: var(--font-sans); font-size: 13px; color: var(--ui-text-primary);
 }
 .cf button { font: inherit; }
+.cf.is-brand { --cf-accent: var(--cf-brand); --cf-accent-ink: var(--cf-brand-ink); }
+/* SDK primary buttons (bg-primary) follow the same choice. */
+.cf.is-brand button.bg-primary { background-color: var(--cf-accent); color: var(--cf-accent-ink); }
+.cf.is-brand button.bg-primary:hover { background-color: var(--cf-accent); filter: brightness(1.05); }
 .cf-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
 .cf-logo { display: block; width: 104px; height: 21px; color: var(--ui-text-primary); }
 .cf-header-end { display: flex; align-items: center; gap: 4px; }
 .cf-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ui-text-tertiary); margin-right: 2px; }
 .cf-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ui-text-quaternary); flex: none; }
 .cf-dot.is-on { background: var(--ui-green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-green) 22%, transparent); }
-.cf-dot.is-warn { background: var(--cf-brand); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cf-brand) 25%, transparent); }
+.cf-dot.is-warn { background: var(--cf-warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cf-warn) 25%, transparent); }
 .cf-icon-btn { display: inline-grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 7px;
   background: transparent; color: var(--ui-text-secondary); cursor: pointer; }
 .cf-icon-btn:hover { background: var(--chrome-action-hover); color: var(--ui-text-primary); }
 .cf-icon-btn:focus-visible, .cf-action:focus-visible, .cf-chip:focus-visible, .cf-link:focus-visible, .cf-notice:focus-visible, .cf-token:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--cf-brand) 70%, var(--ui-text-primary)); outline-offset: 2px; }
+  outline: 2px solid color-mix(in srgb, var(--cf-accent) 70%, var(--ui-text-primary)); outline-offset: 2px; }
 
 .cf-card { background: var(--ui-widget-surface-background); border: 1px solid var(--ui-stroke-tertiary);
   border-radius: var(--cf-radius); padding: 14px; }
 .cf-hero { position: relative; overflow: hidden;
-  background-image: radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--cf-brand) 9%, transparent), transparent 58%); }
+  background-image: radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--cf-accent) 9%, transparent), transparent 58%); }
 .cf-eyebrow { white-space: nowrap; font-size: 11px; font-weight: 500; letter-spacing: .04em; text-transform: uppercase; color: var(--ui-text-tertiary); }
 .cf-hero-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cf-chip { white-space: nowrap; flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 9px; border: 0; border-radius: 999px;
@@ -99,15 +111,15 @@ const STYLES = `
   background: transparent; color: var(--ui-text-secondary); font-size: 11.5px; cursor: pointer; }
 .cf-action-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%;
   background: var(--ui-bg-quaternary); color: var(--ui-text-primary); transition: transform .12s ease, filter .12s ease; }
-.cf-action.is-primary .cf-action-icon { background: var(--cf-brand); color: var(--cf-brand-ink); }
+.cf-action.is-primary .cf-action-icon { background: var(--cf-accent); color: var(--cf-accent-ink); }
 .cf-action:not(:disabled):hover { color: var(--ui-text-primary); }
 .cf-action:not(:disabled):hover .cf-action-icon { transform: translateY(-1px); filter: brightness(1.06); }
 .cf-action:disabled { cursor: not-allowed; opacity: .42; }
 
 .cf-notice { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 11px; border-radius: 10px; text-align: left; cursor: pointer;
-  border: 1px solid color-mix(in srgb, var(--cf-brand) 38%, var(--ui-stroke-tertiary));
-  background: color-mix(in srgb, var(--cf-brand) 9%, transparent); color: var(--ui-text-primary); font-size: 12px; }
-.cf-notice:hover { background: color-mix(in srgb, var(--cf-brand) 15%, transparent); }
+  border: 1px solid color-mix(in srgb, var(--cf-accent) 38%, var(--ui-stroke-tertiary));
+  background: color-mix(in srgb, var(--cf-accent) 9%, transparent); color: var(--ui-text-primary); font-size: 12px; }
+.cf-notice:hover { background: color-mix(in srgb, var(--cf-accent) 15%, transparent); }
 .cf-notice-text { flex: 1; min-width: 0; }
 .cf-notice-text b { font-weight: 600; }
 
@@ -158,13 +170,13 @@ const STYLES = `
 
 .cf-chip.is-static { cursor: default; }
 .cf-chip.is-static:hover { background: var(--ui-bg-quaternary); color: var(--ui-text-secondary); }
-.cf-action[aria-pressed="true"] .cf-action-icon { background: color-mix(in srgb, var(--cf-brand) 26%, var(--ui-bg-quaternary)); }
+.cf-action[aria-pressed="true"] .cf-action-icon { background: color-mix(in srgb, var(--cf-accent) 26%, var(--ui-bg-quaternary)); }
 .cf-allow-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .cf-allow-state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 500; color: var(--ui-text-secondary); }
 .cf-allow-figure { margin-top: 8px; font-family: var(--cf-serif); font-size: 24px; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .cf-allow-figure small { font-family: var(--font-sans); font-size: 12px; color: var(--ui-text-tertiary); margin-left: 3px; }
 .cf-meter { height: 6px; margin: 10px 0 6px; border-radius: 999px; background: var(--ui-bg-quaternary); overflow: hidden; }
-.cf-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-brand); }
+.cf-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-accent); }
 .cf-stack { display: flex; flex-direction: column; gap: 10px; }
 .cf-ok { font-size: 12px; color: var(--ui-green); }
 .cf-err { font-size: 12px; color: var(--ui-red); }
@@ -1137,7 +1149,7 @@ function hostOf(url) {
   }
 }
 
-function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage }) {
+function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage, brand, setBrand }) {
   const who = status.signed_in_as || status.email || ''
   return jsxs(Fragment, {
     children: [
@@ -1190,6 +1202,21 @@ function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage
                 }),
               }),
             ],
+          }),
+        ],
+      }),
+      jsxs('section', {
+        className: 'cf-section',
+        children: [
+          jsx('div', { className: 'cf-section-head', children: jsx('span', { className: 'cf-section-title', children: 'Appearance' }) }),
+          jsx('div', {
+            className: 'cf-card',
+            children: jsx(ToggleRow, {
+              label: 'CoinFello colors',
+              description: "Use CoinFello's yellow for buttons and highlights instead of your Hermes accent color.",
+              checked: brand,
+              onChange: setBrand,
+            }),
           }),
         ],
       }),
@@ -1365,6 +1392,12 @@ function Pane({ ctx }) {
   const connected = !!(data && data.connected)
   const [view, setView] = useState({ kind: 'home' })
   const [allowanceMessage, setAllowanceMessage] = useState('')
+  // A presentation preference for this app: plugin-scoped local storage.
+  const [brand, setBrandState] = useState(() => ctx.storage.get('brandColors', false) === true)
+  const setBrand = (on) => {
+    setBrandState(on)
+    ctx.storage.set('brandColors', on)
+  }
   const home = () => setView({ kind: 'home' })
 
   useLimitPoll(ctx, connected ? data.pending_limit_change_url : null, refresh, setAllowanceMessage)
@@ -1406,7 +1439,7 @@ function Pane({ ctx }) {
   } else if (connected && view.kind === 'swap') {
     body = jsx(SwapEmbed, { ctx, appUrl: data.app_url, onClose: home })
   } else if (connected && view.kind === 'settings') {
-    body = jsx(Settings, { ctx, status: data, refresh, onBack: home, onSignOut: signOut, message: allowanceMessage, setMessage: setAllowanceMessage })
+    body = jsx(Settings, { ctx, status: data, refresh, onBack: home, onSignOut: signOut, message: allowanceMessage, setMessage: setAllowanceMessage, brand, setBrand })
   } else if (connected) {
     body = jsxs(Fragment, {
       children: [
@@ -1428,7 +1461,7 @@ function Pane({ ctx }) {
   const readOnly = connected && data.access && data.access !== 'unknown' && data.access !== 'trade'
   const settingsOpen = view.kind === 'settings'
   return jsxs('div', {
-    className: 'cf',
+    className: cn('cf', brand && 'is-brand'),
     children: [
       jsxs('header', {
         className: 'cf-header',

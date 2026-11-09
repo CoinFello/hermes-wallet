@@ -82,13 +82,16 @@ never in `config.yaml`.
   opens Settings.
 - **Settings:** the trading allowance (daily limit, what's left in the last
   24 hours, change it without signing in again), the account and sign-out,
-  and the server in use.
+  **Appearance** (CoinFello colors), and the server in use.
 
 The styling is one stylesheet scoped to `.cf`, injected at register and
 removed on dispose. Surfaces, text, borders, fonts and gain/loss colours come
-from the active Hermes theme (`--ui-*`, `--font-*`, `--ui-green`/`--ui-red`);
-CoinFello contributes the brand yellow for the primary action and accents,
-the serif portfolio figures, round token icons and rounded cards.
+from the active Hermes theme (`--ui-*`, `--font-*`, `--ui-green`/`--ui-red`).
+Buttons and highlights use the theme's accent (`--dt-primary`, the colour of
+Hermes' own primary buttons) by default; **Settings > Appearance > CoinFello
+colors** switches them to CoinFello's yellow (saved per app with
+`ctx.storage`). CoinFello also contributes the logo, serif portfolio figures,
+round token icons and rounded cards.
 
 ## Sign-in flow
 
