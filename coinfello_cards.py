@@ -32,9 +32,11 @@ from typing import Any, Callable, NamedTuple
 
 try:  # package import inside Hermes; plain import in tests / the dashboard
     from . import coinfello_core as core
+    from . import coinfello_earn as earn
     from . import coinfello_trades as trades
 except ImportError:  # pragma: no cover
     import coinfello_core as core  # type: ignore[no-redef]
+    import coinfello_earn as earn  # type: ignore[no-redef]
     import coinfello_trades as trades  # type: ignore[no-redef]
 
 PLUGIN_ID = "coinfello"
@@ -421,12 +423,43 @@ def card_names() -> list[str]:
     return list(CARDS)
 
 
+def _earn_on_desktop(arguments: Any, *, session_id: str) -> dict | None:
+    """``earn_deposit`` on Hermes desktop. With the server's Earn embed: the
+    pane's Earn view (CoinFello's real Earn UI; no typed yield id). Without
+    it: the read-only yield card, when the arguments can fill it. None means
+    neither applies, so the earn_deposit card is shown as before."""
+    if core.embeds_earn():
+        return earn.open_from_model(arguments, session_id=session_id)
+    chosen = earn.preselect(arguments)
+    yield_args = dict(arguments) if isinstance(arguments, dict) else {}
+    if chosen.get("token"):
+        yield_args.setdefault("token", chosen["token"])
+    if chosen.get("chain_id"):
+        yield_args.setdefault("chain_ids", [chosen["chain_id"]])
+    kind = CARDS["yield"]
+    if (not core.supports(kind.tool) or core.card_resource_uri(kind.tool) != kind.uri
+            or _missing_required(kind.tool, tool_arguments(kind.tool, yield_args))):
+        return None
+    shown = show_card("yield", yield_args, session_id=session_id, surface="desktop")
+    shown["note"] = PANE_NOTE + " " + earn.EARN_FALLBACK_NOTE.format(url=core.app_url("/earn"))
+    shown["earn_view"] = False
+    return shown
+
+
 def show_card(card: Any, arguments: Any = None, *, session_id: str = "", surface: str | None = None) -> dict:
-    """Call ``show_<card>_card``; on desktop, store it for the pane."""
+    """Call ``show_<card>_card``; on desktop, store it for the pane.
+
+    ``earn_deposit`` on desktop opens the pane's Earn view instead, when the
+    server has it (see ``_earn_on_desktop``)."""
     name = str(card or "").strip().lower().replace("-", "_")
     kind = CARDS.get(name)
     if kind is None:
         raise ValueError(f"unknown card {card!r}: one of {', '.join(CARDS)}")
+    surface = session_surface() if surface is None else surface
+    if name == "earn_deposit" and surface == "desktop":
+        routed = _earn_on_desktop(arguments, session_id=session_id)
+        if routed is not None:
+            return routed
     if not core.supports(kind.tool):
         raise RuntimeError(
             f"This CoinFello server has no {name} card yet ({kind.tool}). Use the "
@@ -451,7 +484,6 @@ def show_card(card: Any, arguments: Any = None, *, session_id: str = "", surface
     if result.get("isError"):
         raise core.ToolError(text or f"{kind.tool} failed without detail")
 
-    surface = session_surface() if surface is None else surface
     if surface != "desktop":
         return {
             "ok": True,

@@ -9,6 +9,10 @@
  * the plugin backend (coinfello_portfolio.py). Deeper views open in
  * CoinFello itself.
  *
+ * Swap and Earn host CoinFello's own UI (coinfello-web /embed/swap and
+ * /embed/earn) in a sandboxed frame; see "embedded views" below. The agent's
+ * coinfello_show_card(card="earn_deposit") opens the Earn view.
+ *
  * Cards the agent shows (coinfello_show_card) appear at the top of the pane:
  * CoinFello's MCP App cards, each in a sandboxed frame, with the MCP Apps
  * bridge answered here (see "MCP App cards" below).
@@ -152,7 +156,7 @@ function WalletCard({ ctx }) {
   })
 }
 
-function Portfolio({ ctx, onSend, onSwap }) {
+function Portfolio({ ctx, onSend, onSwap, onEarn }) {
   const portfolio = useQuery({
     queryKey: ['coinfello', 'portfolio'],
     queryFn: () => ctx.rest('/portfolio'),
@@ -195,8 +199,24 @@ function Portfolio({ ctx, onSend, onSwap }) {
             onClick: onSwap,
             children: jsxs(Fragment, { children: [jsx(Codicon, { name: 'arrow-swap', size: 12 }), 'Swap'] }),
           }),
+          // Read-only sessions may browse: the server decides on deposits.
+          data.earn_supported
+            ? jsx(Button, {
+                size: 'sm',
+                variant: 'secondary',
+                className: 'flex-1',
+                onClick: onEarn,
+                children: jsxs(Fragment, { children: [jsx(Codicon, { name: 'graph-line', size: 12 }), 'Earn'] }),
+              })
+            : null,
         ],
       }),
+      data.earn_supported === false
+        ? jsx('div', {
+            className: cn('text-[0.6875rem]', muted),
+            children: 'Earn opens here once CoinFello updates. Until then, ask the agent for yields to see them as a card.',
+          })
+        : null,
       data.networks.length === 0
         ? jsx('div', { className: cn('text-xs', muted), children: 'No tokens yet — fund the wallet above to get started.' })
         : jsx('div', {
@@ -510,69 +530,190 @@ function SendFlow({ ctx, portfolio, onClose }) {
   })
 }
 
-// -- swap: CoinFello's real swap UI, embedded (coinfello-web /embed/swap) --------
+// -- embedded views: CoinFello's real swap and Earn UIs (coinfello-web /embed/*) --
+//
+// One host for every embed: a sandboxed frame on <app><path>?theme=..., a
+// short-lived token minted for its scope and handed over by postMessage, and
+// its resize and result messages. The embeds speak the same protocol:
+//   child  -> parent  {type: 'coinfello:embed-ready', version: 1}
+//                     (again, with the nonce, when its token is rejected)
+//   parent -> child   {type: 'coinfello:embed-token', token, nonce}
+//   child  -> parent  {type: 'coinfello:embed-resize', height}
+//   child  -> parent  {type: <the embed's resultType>, status, ...}
+//
+// Everything between the embed-host markers is plain JavaScript with no
+// React or SDK import, so tests/embed_host.test.mjs can run it under node.
 
-function SwapEmbed({ ctx, appUrl, onClose }) {
+/* embed-host:start */
+const EMBED_HEIGHT_MIN = 240
+const EMBED_HEIGHT_MAX = 1200
+const EMBED_HEIGHT_DEFAULT = 560
+// Tokens live 15 minutes. A re-request within a minute of the last token
+// means the session itself is gone (signed out, revoked).
+const EMBED_REFRESH_GAP_MS = 60000
+const EMBED_CHECK_TEXT = 'It may have gone through. Check the transaction or your CoinFello activity before trying again.'
+
+const EMBEDS = {
+  swap: {
+    scope: 'swap',
+    path: '/embed/swap',
+    resultType: 'coinfello:swap-result',
+    title: 'Swap',
+    frameTitle: 'CoinFello swap',
+    mintError: 'Could not open swap',
+    sessionEnded: 'Your CoinFello session ended. Sign in again, then reopen Swap.',
+    reloaded: 'The swap view reloaded. Reopen it to continue.',
+  },
+  earn: {
+    scope: 'earn',
+    path: '/embed/earn',
+    resultType: 'coinfello:earn-result',
+    title: 'Earn',
+    frameTitle: 'CoinFello Earn',
+    mintError: 'Could not open Earn',
+    sessionEnded: 'Your CoinFello session ended. Sign in again, then reopen Earn.',
+    reloaded: 'The Earn view reloaded. Reopen it to continue.',
+  },
+}
+
+/** The frame's URL. `query` is the backend's already-escaped preselect
+ * (coinfello_earn.frame_query); it always follows the theme. */
+function embedFrameSrc({ appUrl, path, theme, query }) {
+  const base = String(appUrl || '').replace(/\/+$/, '')
+  const shade = theme === 'dark' ? 'dark' : 'light'
+  return `${base}${path}?theme=${shade}${query ? `&${query}` : ''}`
+}
+
+function clampEmbedHeight(height) {
+  return Math.min(EMBED_HEIGHT_MAX, Math.max(EMBED_HEIGHT_MIN, Number(height)))
+}
+
+const embedErrorOf = (result, fallback) => (result && result.error) || fallback
+
+/**
+ * The parent half of the embed protocol, for one mount.
+ *   frameWindow()         the frame's contentWindow (or null)
+ *   post(target, message) posts to `target`, the window that asked
+ *   mint()         resolves to /embed-token's answer for this scope
+ *   nonce          a per-mount secret, handed over with the first token
+ */
+function createEmbedHost({ embed, frameWindow, post, mint, nonce, now = () => Date.now(), onError, onResize, onResult }) {
+  let tokenSent = false
+  let lastSentAt = 0
+  const sendToken = async (target) => {
+    lastSentAt = now()
+    const minted = await mint()
+    if (!minted || minted.ok === false) {
+      onError(embedErrorOf(minted, embed.mintError), minted || null)
+      return
+    }
+    // A sandboxed (opaque-origin) frame can only be addressed with '*'; the
+    // token is short-lived and good only for this embed's scope.
+    post(target, { type: 'coinfello:embed-token', token: minted.token, nonce })
+  }
+  /** Handles one window message event; false when it was not ours. */
+  const handle = async (event) => {
+    const own = frameWindow()
+    // Only our own frame speaks this protocol; everything else is ignored.
+    if (!own || !event || event.source !== own) return false
+    const message = (event.data && typeof event.data === 'object') ? event.data : {}
+    if (message.type === 'coinfello:embed-ready') {
+      if (!tokenSent) {
+        tokenSent = true
+        await sendToken(own)
+      } else if (message.nonce === nonce) {
+        // Minting again so soon would loop on a dead session: stop and say so.
+        if (now() - lastSentAt < EMBED_REFRESH_GAP_MS) {
+          onError(embed.sessionEnded, null)
+          return true
+        }
+        await sendToken(own) // an expired token, from the same document
+      } else {
+        // A document the frame navigated to never saw the nonce: no token.
+        onError(embed.reloaded, null)
+      }
+    } else if (message.type === 'coinfello:embed-resize' && Number(message.height) > 0) {
+      onResize(clampEmbedHeight(message.height))
+    } else if (message.type === embed.resultType) {
+      onResult(message)
+    }
+    return true
+  }
+  return { handle }
+}
+
+const TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/
+
+/** Swap's result line, as it has always been: only a success is shown. */
+function swapOutcome(message) {
+  return message && message.status === 'success' ? { tone: 'good', title: 'Swap submitted.', detail: '', explorerUrl: '' } : null
+}
+
+/**
+ * Earn's result. "Nothing was sent" only when the embed says it was
+ * cancelled or failed AND names no transaction; anything else that is not a
+ * clean success (unknown, outcomeUnknown, a failure with a hash, a status we
+ * do not know) asks the person to check, never to retry.
+ */
+function earnOutcome(message) {
+  if (!message || typeof message !== 'object') return null
+  const hash = typeof message.transactionHash === 'string' && TX_HASH_RE.test(message.transactionHash) ? message.transactionHash : ''
+  const explorerUrl = hash ? `https://blockscan.com/tx/${hash}` : ''
+  const error = typeof message.error === 'string' ? message.error.trim().slice(0, 300) : ''
+  const unknown = message.outcomeUnknown === true
+  if (message.status === 'success' && !unknown) {
+    return { tone: 'good', title: 'Deposit submitted.', detail: '', explorerUrl }
+  }
+  if (!hash && !unknown && message.status === 'cancelled') {
+    return { tone: 'muted', title: 'Deposit cancelled.', detail: 'Nothing was sent.', explorerUrl: '' }
+  }
+  if (!hash && !unknown && message.status === 'failed') {
+    return { tone: 'bad', title: 'Deposit failed.', detail: error ? `${error} Nothing was sent.` : 'Nothing was sent.', explorerUrl: '' }
+  }
+  return { tone: 'muted', title: 'Deposit status unknown. Check status.', detail: error ? `${error} ${EMBED_CHECK_TEXT}` : EMBED_CHECK_TEXT, explorerUrl }
+}
+/* embed-host:end */
+
+const EMBED_OUTCOMES = { swap: swapOutcome, earn: earnOutcome }
+const EARN_OPEN_EVENT = 'plugin.coinfello.earn.open'
+
+function EmbedView({ ctx, appUrl, kind, query, onClose }) {
+  const embed = EMBEDS[kind]
   const queryClient = useQueryClient()
   const frameRef = useRef(null)
-  const tokenSentRef = useRef(false)
   const [mount, setMount] = useState(0)
-  const [height, setHeight] = useState(560)
-  const [notice, setNotice] = useState('')
+  const [height, setHeight] = useState(EMBED_HEIGHT_DEFAULT)
+  const [outcome, setOutcome] = useState(null)
   const [error, setError] = useState('')
 
   const dark = document.documentElement.classList.contains('dark')
-  const src = `${String(appUrl || '').replace(/\/$/, '')}/embed/swap?theme=${dark ? 'dark' : 'light'}`
+  const src = embedFrameSrc({ appUrl, path: embed.path, theme: dark ? 'dark' : 'light', query })
 
   useEffect(() => {
-    tokenSentRef.current = false
-    // Per-mount secret, handed to the embed with its first token. Later token
-    // requests (the embed asks again when a token expires) must echo it: a
-    // document the frame navigated to never saw it, so it gets nothing.
-    const nonce = crypto.randomUUID()
-    let lastSentAt = 0
-    const sendToken = async (frame) => {
-      lastSentAt = Date.now()
-      const minted = await ctx.rest('/embed-token', { method: 'POST', body: {} })
-      if (!minted || minted.ok === false) {
-        setError(errorOf(minted, 'Could not open swap'))
-        return
-      }
-      // A sandboxed (opaque-origin) frame can only be addressed with '*';
-      // the token is short-lived and swap-scoped.
-      frame.contentWindow.postMessage({ type: 'coinfello:embed-token', token: minted.token, nonce }, '*')
-    }
-    const onMessage = async (event) => {
-      const frame = frameRef.current
-      // Only our own frame speaks this protocol; everything else is ignored.
-      if (!frame || event.source !== frame.contentWindow) return
-      const message = event.data || {}
-      if (message.type === 'coinfello:embed-ready') {
-        if (!tokenSentRef.current) {
-          tokenSentRef.current = true
-          await sendToken(frame)
-        } else if (message.nonce === nonce) {
-          // Tokens live 15 minutes. A re-request within a minute of the last
-          // token means the session itself is gone (signed out, revoked):
-          // minting more would loop, so stop and say so.
-          if (Date.now() - lastSentAt < 60000) {
-            setError('Your CoinFello session ended. Sign in again, then reopen Swap.')
-            return
-          }
-          await sendToken(frame) // an expired token, from the same document
-        } else {
-          setError('The swap view reloaded. Reopen it to continue.')
-        }
-      } else if (message.type === 'coinfello:embed-resize' && Number(message.height) > 0) {
-        setHeight(Math.min(1200, Math.max(240, Number(message.height))))
-      } else if (message.type === 'coinfello:swap-result') {
+    const host = createEmbedHost({
+      embed,
+      // Per-mount secret: later token requests must echo it.
+      nonce: crypto.randomUUID(),
+      frameWindow: () => (frameRef.current ? frameRef.current.contentWindow : null),
+      post: (target, message) => target.postMessage(message, '*'),
+      // Swap's request is unchanged ({}: the backend defaults to swap).
+      mint: () => ctx.rest('/embed-token', { method: 'POST', body: embed.scope === 'swap' ? {} : { scope: embed.scope } }),
+      onError: setError,
+      onResize: setHeight,
+      onResult: (message) => {
         queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
-        if (message.status === 'success') setNotice('Swap submitted.')
-      }
+        const next = EMBED_OUTCOMES[kind](message)
+        if (next) setOutcome(next)
+      },
+    })
+    const onMessage = (event) => {
+      host.handle(event)
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [mount, ctx, queryClient])
+  }, [mount, ctx, queryClient, kind])
+
+  const toneClass = outcome ? (outcome.tone === 'good' ? up : outcome.tone === 'bad' ? down : muted) : ''
 
   return jsxs('div', {
     className: 'flex flex-col gap-2',
@@ -580,7 +721,7 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
       jsxs('div', {
         className: row,
         children: [
-          jsx('div', { className: 'font-medium', children: 'Swap' }),
+          jsx('div', { className: 'font-medium', children: embed.title }),
           jsx(Button, { variant: 'ghost', size: 'sm', onClick: onClose, children: 'Close' }),
         ],
       }),
@@ -593,18 +734,59 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
             ],
           })
         : null,
-      notice ? jsx('div', { className: cn('text-xs', up), children: notice }) : null,
+      outcome
+        ? jsxs('div', {
+            className: 'flex flex-col gap-1',
+            children: [
+              jsx('div', { className: cn('text-xs', toneClass), children: outcome.title }),
+              outcome.detail ? jsx('div', { className: cn('text-[0.6875rem]', muted), children: outcome.detail }) : null,
+              outcome.explorerUrl
+                ? jsx('div', {
+                    children: jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(outcome.explorerUrl), children: 'View transaction' }),
+                  })
+                : null,
+            ],
+          })
+        : null,
       jsx(SandboxedFrame, {
         key: mount,
         ref: frameRef,
         src,
-        title: 'CoinFello swap',
+        title: embed.frameTitle,
         sandbox: 'allow-scripts allow-forms',
         className: 'w-full rounded-md',
         style: { height },
       }),
     ],
   })
+}
+
+/**
+ * The model's coinfello_show_card(card="earn_deposit") on desktop leaves an
+ * "open Earn" request in the backend (coinfello_earn). Open it here once:
+ * at the event, or at the next poll on Hermes builds without events.
+ */
+function useEarnRequests(ctx, enabled, open) {
+  const queryClient = useQueryClient()
+  const request = useQuery({
+    queryKey: ['coinfello', 'earn-request'],
+    queryFn: () => ctx.rest('/earn/request'),
+    enabled,
+    refetchInterval: 20 * 1000,
+  })
+  useEffect(() => {
+    if (!enabled || typeof ctx.onEvent !== 'function') return undefined
+    return ctx.onEvent(EARN_OPEN_EVENT, () => queryClient.invalidateQueries({ queryKey: ['coinfello', 'earn-request'] }))
+  }, [ctx, queryClient, enabled])
+  const pending = enabled && request.data && request.data.ok !== false ? request.data.request : null
+  const pendingId = pending ? pending.id : ''
+  useEffect(() => {
+    if (!pending) return
+    open(pending)
+    ctx.rest(`/earn/request/${pending.id}/consume`, { method: 'POST', body: {} })
+      .catch(() => {})
+      .finally(() => queryClient.invalidateQueries({ queryKey: ['coinfello', 'earn-request'] }))
+  }, [pendingId])
 }
 
 // -- signed-out: browser-first sign-in ------------------------------------------
@@ -1484,6 +1666,9 @@ function Pane({ ctx }) {
   const data = status.data
   const connected = !!(data && data.connected)
   const [view, setView] = useState({ kind: 'home' })
+  useEarnRequests(ctx, connected && !!data.earn_supported, (request) =>
+    setView({ kind: 'earn', query: request.query || '', requestId: request.id }),
+  )
 
   const signOut = async () => {
     // Optimistic: show the signed-out pane now. The backend forgets the
@@ -1511,7 +1696,16 @@ function Pane({ ctx }) {
   else if (connected && view.kind === 'send') {
     body = jsx(SendFlow, { ctx, portfolio: view.portfolio, onClose: () => setView({ kind: 'home' }) })
   } else if (connected && view.kind === 'swap') {
-    body = jsx(SwapEmbed, { ctx, appUrl: data.app_url, onClose: () => setView({ kind: 'home' }) })
+    body = jsx(EmbedView, { ctx, appUrl: data.app_url, kind: 'swap', onClose: () => setView({ kind: 'home' }) })
+  } else if (connected && view.kind === 'earn') {
+    body = jsx(EmbedView, {
+      key: view.requestId || 'earn',
+      ctx,
+      appUrl: data.app_url,
+      kind: 'earn',
+      query: view.query || '',
+      onClose: () => setView({ kind: 'home' }),
+    })
   } else if (connected) {
     body = jsxs(Fragment, {
       children: [
@@ -1524,6 +1718,7 @@ function Pane({ ctx }) {
           ctx,
           onSend: (portfolio) => setView({ kind: 'send', portfolio }),
           onSwap: () => setView({ kind: 'swap' }),
+          onEarn: () => setView({ kind: 'earn' }),
         }),
         jsxs('div', {
           className: cn(row, 'border-t border-(--ui-stroke-secondary) pt-2 text-[0.6875rem]', muted),

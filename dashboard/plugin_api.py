@@ -28,6 +28,7 @@ from pydantic import BaseModel  # noqa: E402
 
 import coinfello_cards as cards  # noqa: E402
 import coinfello_core as core  # noqa: E402
+import coinfello_earn as earn  # noqa: E402
 
 router = APIRouter()
 
@@ -126,9 +127,46 @@ def intent_execute(body: IntentBody):
     return _safe(lambda: core.execute_intent(body.intent_id))
 
 
+class EmbedBody(BaseModel):
+    """``scope`` is the embedded view: ``swap`` (the default) or ``earn``."""
+
+    scope: Optional[str] = None
+
+
+EARN_READ_ONLY = (
+    "This session is read-only, so Earn cannot open for deposits. "
+    "Close this and set a daily limit to deposit."
+)
+
+
 @router.post("/embed-token")
-def embed_token():
-    return _safe(lambda: core.embed_token("swap"))
+def embed_token(body: Optional[EmbedBody] = None):
+    scope = (body.scope if body else None) or "swap"
+    if scope != "earn":
+        return _safe(lambda: core.embed_token(scope))
+
+    def mint_earn():
+        try:
+            return core.embed_token("earn")
+        except core.NeedsTradingAccess:
+            # The server refused a read-only session. Say it in the pane's
+            # words (the server's are written for the agent).
+            return {"ok": False, "needs_trading_access": True, "error": EARN_READ_ONLY}
+
+    return _safe(mint_earn)
+
+
+# -- the Earn view: "open Earn" requests the model leaves (coinfello_earn) -------
+
+
+@router.get("/earn/request")
+def earn_request():
+    return _safe(lambda: {"ok": True, "request": earn.pending_request()})
+
+
+@router.post("/earn/request/{request_id}/consume")
+def earn_request_consume(request_id: str):
+    return _safe(lambda: earn.consume_request(request_id))
 
 
 class LimitBody(BaseModel):

@@ -172,6 +172,36 @@ the tool returns the card's text everywhere. The plugin does not advertise
 the MCP Apps extension to the server, so card tools always answer with
 their full text plus `structuredContent`, on every surface.
 
+### Swap and Earn: CoinFello's own UI in the pane
+
+The pane's **Swap** and **Earn** buttons host coinfello-web's `/embed/swap`
+and `/embed/earn` (the app's real components) in a `SandboxedFrame`. One host
+serves both (`desktop/plugin.js`, the `embed-host` section): the frame loads
+`<app><path>?theme=dark|light`, says `coinfello:embed-ready`, and gets a
+15-minute token minted for its scope (`create_embed_token {scope}`, never the
+session token) with a per-mount nonce. A later token request must echo the
+nonce, and one within a minute of the last token stops instead of looping
+on a dead session. Results arrive as `coinfello:swap-result` /
+`coinfello:earn-result`; an Earn result says "nothing was sent" only for a
+cancel or failure with no transaction, and anything uncertain links the
+transaction and asks to check it.
+
+- **Earn preselects**: `&opportunity=<yield id>`, or `&token=<SYMBOL>&chain_id=<n>`,
+  validated and percent-encoded by `coinfello_earn.frame_query`.
+- **From the agent**: `coinfello_show_card` with `card="earn_deposit"` on
+  Hermes desktop opens the Earn view (with any preselect from its
+  arguments) instead of the typed-yield-id card, and calls no CoinFello tool.
+  Other surfaces keep the card's text. This reuses `coinfello_show_card`
+  rather than adding a tool: it is where the agent already goes to deposit,
+  and it keeps the desktop-or-text rule in one place. The `yield` card is
+  unchanged.
+- **Read-only sessions** may open Earn: the server decides whether to mint a
+  token for browsing, and a refusal is shown in plain words.
+- **Older servers** (no `scope` on `create_embed_token`, or one without
+  `earn`): no Earn button, a one-line note, and `earn_deposit` on desktop
+  shows the read-only `yield` card when it has a token to show (otherwise
+  the deposit card, as before).
+
 ## Security notes
 
 - The MCP session token can move funds from the automation wallet. Treat it
@@ -190,6 +220,7 @@ their full text plus `structuredContent`, on every surface.
 uv run --no-project --with pytest --with fastapi --with httpx --with 'segno>=1.6,<2' pytest tests/
 node --test tests/card_bridge.test.mjs   # the pane's card bridge (pytest runs it too when node is installed)
 node --test tests/amount.test.mjs        # the pane's amount normalizer (likewise)
+node --test tests/embed_host.test.mjs    # the pane's swap/Earn embed host (likewise)
 ```
 
 The test suite runs a local mock of the MCP streamable-HTTP transport — no
@@ -208,6 +239,7 @@ network or real credentials involved.
 ├── coinfello_tools.py     tool schemas + handlers
 ├── coinfello_trades.py    prepare/execute, the approval hook, transfer status
 ├── coinfello_cards.py     MCP App cards: show, card records, CSP, bridge allowlist
+├── coinfello_earn.py      the Earn view: preselects, frame query, the agent's open request
 ├── dashboard/             web/desktop backend: FastAPI router at /api/plugins/coinfello/
 ├── desktop/plugin.js      desktop pane + statusbar chip + card frames
 └── tests/                 mock-MCP test suite

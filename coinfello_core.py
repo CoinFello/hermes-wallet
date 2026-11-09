@@ -64,11 +64,15 @@ def _is_read_only_refusal(exc: Exception) -> bool:
     return "read-only" in text or "read only" in text
 
 
-def trading_call(name: str, payload: dict | None = None, *, timeout: float = 90.0):
+def trading_call(name: str, payload: dict | None = None, *, timeout: float = 90.0,
+                 refuse_locally: bool = True):
     """``call`` for the tools that move funds: refuses up front when the
     session is known read-only, and turns the server's read-only refusal into
-    NeedsTradingAccess, so callers get one clear next step either way."""
-    if load_state().get("access") == "read_only":
+    NeedsTradingAccess, so callers get one clear next step either way.
+
+    ``refuse_locally=False`` always asks the server, for a call it may allow
+    a read-only session (the Earn embed, which can be browsed)."""
+    if refuse_locally and load_state().get("access") == "read_only":
         raise NeedsTradingAccess()
     try:
         return call(name, payload, timeout=timeout)
@@ -112,19 +116,27 @@ def server_tools(*, refresh: bool = False) -> frozenset:
         tools = _client(timeout=20.0).list_tools()
         names = frozenset(tool.get("name", "") for tool in tools)
         descriptions = {tool.get("name", ""): tool.get("description") or "" for tool in tools}
-        params = {
-            tool.get("name", ""): frozenset(((tool.get("inputSchema") or {}).get("properties") or {}).keys())
-            for tool in tools
-        }
+        properties = {tool.get("name", ""): _properties(tool) for tool in tools}
+        params = {name: frozenset(props) for name, props in properties.items()}
         required = {tool.get("name", ""): _required_params(tool) for tool in tools}
         card_uris = {
             tool.get("name", ""): uri for tool in tools if (uri := _card_resource_uri(tool))
         }
         _capabilities.update(
             url=url, tools=names, descriptions=descriptions, params=params,
-            required=required, card_uris=card_uris, at=time.monotonic(),
+            properties=properties, required=required, card_uris=card_uris,
+            at=time.monotonic(),
         )
     return _capabilities["tools"]
+
+
+def _properties(tool: dict) -> dict:
+    """The schema's ``properties``: name -> its own schema."""
+    schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    return {name: spec if isinstance(spec, dict) else {} for name, spec in properties.items()}
 
 
 def _required_params(tool: dict) -> tuple:
@@ -634,6 +646,18 @@ def disconnect(*, wait: bool = True) -> dict:
     return result
 
 
+def param_enum(tool: str, param: str) -> tuple | None:
+    """The values the server's schema allows for ``param`` (None when the
+    schema names no ``enum``, so any value it validates is allowed)."""
+    try:
+        server_tools()
+    except MCPError:
+        return None
+    spec = ((_capabilities.get("properties") or {}).get(tool) or {}).get(param) or {}
+    values = spec.get("enum")
+    return tuple(values) if isinstance(values, list) else None
+
+
 # -- status + pane models ----------------------------------------------------
 
 def status(*, live: bool = True) -> dict:
@@ -675,6 +699,7 @@ def status(*, live: bool = True) -> dict:
     # instant the user signs out (cached capability probe: no extra request).
     summary["sign_in_mode"] = sign_in_mode()
     summary["can_adjust_limit"] = can_adjust_limit()
+    summary["earn_supported"] = embeds_earn()
     if state.get("pending_limit_change_id"):
         summary["pending_limit_change_url"] = state.get("pending_limit_change_url") or ""
         summary["pending_limit_requested"] = state.get("pending_limit_requested")
@@ -746,6 +771,10 @@ def portfolio() -> dict:
     model["can_trade"] = access["can_trade"]
     model["can_send"] = access["can_trade"] and supports("prepare_send") and supports("execute_intent")
     model["can_swap"] = access["can_trade"] and supports("create_embed_token")
+    # Earn is offered on read-only sessions too: browsing yields needs no
+    # trading access, and the server decides whether to mint (see embed_token).
+    model["earn_supported"] = embeds_earn()
+    model["earn_url"] = app_url("/earn")
     return model
 
 
@@ -859,22 +888,49 @@ def explorer_url(transaction_hash: Any) -> str | None:
     return f"https://blockscan.com/tx/{transaction_hash}"
 
 
+#: The embedded views the pane hosts: scope -> its path on the app.
+EMBED_PATHS = {"swap": "/embed/swap", "earn": "/embed/earn"}
+EARN_NEEDS_UPDATE = "Earn in Hermes needs a CoinFello server update."
+
+
+def embeds_earn() -> bool:
+    """True when the server mints Earn embed tokens: ``create_embed_token``
+    declares ``scope`` and, if it lists the values, ``earn`` is one. Servers
+    before the Earn embed (production until it ships) have no ``scope``."""
+    if not accepts_param("create_embed_token", "scope"):
+        return False
+    values = param_enum("create_embed_token", "scope")
+    return values is None or "earn" in values
+
+
 def embed_token(scope: str = "swap") -> dict:
     """A short-lived, scope-limited token for CoinFello's embedded views.
 
     Minted from the session server-side so the 30-day session token never
-    reaches the renderer; the embed gets this 15-minute, swap-only token.
+    reaches the renderer; the embed gets this 15-minute token, good only for
+    its own view (``swap`` or ``earn``).
+
+    ``scope`` is sent only to a server whose schema declares it. A swap token
+    is refused up front on a session known to be read-only; an Earn token is
+    always asked of the server, which may mint one for browsing.
     """
+    if scope not in EMBED_PATHS:
+        raise ValueError(f"unknown embed scope {scope!r}: one of {', '.join(EMBED_PATHS)}")
     if not supports("create_embed_token"):
-        raise RuntimeError("Swapping from Hermes needs a CoinFello server update.")
-    result = trading_call("create_embed_token", {"scope": scope}, timeout=20.0)
+        raise RuntimeError(
+            "Swapping from Hermes needs a CoinFello server update." if scope == "swap" else EARN_NEEDS_UPDATE
+        )
+    if scope != "swap" and not embeds_earn():
+        raise RuntimeError(EARN_NEEDS_UPDATE)
+    payload = {"scope": scope} if accepts_param("create_embed_token", "scope") else {}
+    result = trading_call("create_embed_token", payload, timeout=20.0, refuse_locally=scope == "swap")
     if not isinstance(result, dict) or not result.get("embed_token"):
         raise RuntimeError(_text(result))
     return {
         "ok": True,
         "token": result["embed_token"],
         "expires_at": result.get("expires_at"),
-        "embed_url": result.get("embed_url") or app_url("/embed/swap"),
+        "embed_url": result.get("embed_url") or app_url(EMBED_PATHS[scope]),
     }
 
 

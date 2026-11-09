@@ -169,6 +169,9 @@ CARD_TOOLS = [
                                                       required=("token", "session_token")),
      "_meta": _ui_meta("ui://coinfello/yield-card.html", flat_only=True)},
     # Declares a card URI the plugin does not know: never drawn.
+    # The typed-yield-id deposit card, which desktop replaces with the Earn view.
+    {"name": "show_earn_deposit_card", "inputSchema": _props("yield_id", "amount", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/earn-deposit-card.html")},
     {"name": "show_status_card", "inputSchema": _props("session_token"),
      "_meta": _ui_meta("ui://elsewhere/status-card.html")},
     {"name": "show_sign_in_card", "inputSchema": _props("session_token"),
@@ -208,6 +211,8 @@ def _card_tool(name, arguments):
             "kind": "network", "retryTool": retry if retry in RETRYABLE else None, "retryArgs": {}})
     if name == "show_automations_card":
         return _card_result("1 open automation.\nWeekly ETH", {"rows": AUTOMATION_ROWS, "note": None})
+    if name == "show_earn_deposit_card":
+        return _card_result("Deposit into a yield: enter its id.", {"yieldId": arguments.get("yield_id")})
     if name in ("show_yield_card", "show_status_card", "show_sign_in_card"):
         return _card_result(f"{name} text", {"rows": []})
     if name in ("pause_automation", "cancel_automation"):
@@ -337,6 +342,15 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                                 "expected_email": {"type": "string"}}}
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
+                if self.state["embed_scopes"] is not None:
+                    # The Earn embed's server: create_embed_token takes a scope.
+                    scope = {"type": "string"}
+                    if self.state["embed_scopes"]:
+                        scope["enum"] = list(self.state["embed_scopes"])
+                    for tool in tools:
+                        if tool["name"] == "create_embed_token":
+                            tool["inputSchema"] = {"type": "object", "properties": {
+                                "scope": scope, "session_token": {"type": "string"}}}
             if self.state["limit_mode"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}}
                           for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
@@ -415,8 +429,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if name in ("set_daily_limit", "start_limit_change", "get_limit_change") and state["limit_mode"]:
             self._limit_tool(message_id, name, arguments)
             return
+        browse_only = (name == "create_embed_token" and arguments.get("scope") == "earn"
+                       and state["earn_read_only_mint"])
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
-                and state["access_mode"]
+                and state["access_mode"] and not browse_only
                 and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
             state["refused_read_only"].append(name)
             self._json(200, _rpc_response(message_id, _tool_result(
@@ -478,7 +494,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 {"success": True, "kind": "send", "transactionHash": "0xabc123"})))
             return
         if name == "create_embed_token" and state["actions"]:
-            self._json(200, _rpc_response(message_id, _tool_result(EMBED_TOKEN)))
+            minted = dict(EMBED_TOKEN)
+            if arguments.get("scope") == "earn":
+                minted.update(embed_token="cfemb_earn", embed_url="https://app.coinfello.test/embed/earn")
+            self._json(200, _rpc_response(message_id, _tool_result(minted)))
             return
         if name == "expire_session":
             state["session_id"] = f"sess-{state['generation'] + 1}"
@@ -607,6 +626,11 @@ def mock_mcp(monkeypatch):
         "price_moved": False,
         "route_changed": False,
         "outcome_unknown": False,
+        # The Earn embed: None = create_embed_token without `scope` (production
+        # before it ships); a list = `scope` with that enum; () = no enum.
+        "embed_scopes": None,
+        # The server mints Earn tokens for read-only sessions (browse only).
+        "earn_read_only_mint": False,
         "transfer_status": False,
         # MCP App cards: show_*_card tools with _meta.ui and resources/read.
         "cards": False,

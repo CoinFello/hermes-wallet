@@ -556,6 +556,10 @@ _SHOW_CARD = (
         "yield ({\"token\": \"USDC\"}), lp_ranges, perp, automations, needs_you, "
         "fund; quote with {\"intent_id\"} from coinfello_prepare_swap / "
         "_prepare_send; error with {\"kind\" or \"message\", \"retry_tool\"}. "
+        "To deposit into a yield, earn_deposit: on desktop it opens CoinFello's "
+        "Earn view in the pane, where the human browses yields, picks one and "
+        "deposits; optionally preselect {\"opportunity\": <yield id>} or "
+        "{\"token\": \"USDC\", \"chain_id\": 8453}. "
         "Those objects go inside `arguments`, not beside `card`. "
         "Executes nothing itself.",
         {
