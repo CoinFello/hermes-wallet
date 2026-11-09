@@ -485,6 +485,28 @@ function SendFlow({ ctx, portfolio, onClose }) {
 
 // -- swap: CoinFello's real swap UI, embedded (coinfello-web /embed/swap) --------
 
+// Hosts the embed may ask us to open (its links can't open themselves: the
+// sandbox has no allow-popups). Block explorers from coinfello-web's
+// BLOCK_EXPLORERS, plus Blockscan and LI.FI's bridge explorer. https only.
+const EMBED_LINK_HOSTS = [
+  'etherscan.io', 'optimistic.etherscan.io', 'sepolia.etherscan.io', 'arbiscan.io',
+  'basescan.org', 'sepolia.basescan.org', 'bscscan.com', 'polygonscan.com',
+  'lineascan.build', 'scrollscan.com', 'mantlescan.xyz', 'snowscan.xyz', 'uniscan.xyz',
+  'katanascan.com', 'monadvision.com', 'explorer.inkonchain.com',
+  'robinhoodchain.blockscout.com', 'blockscan.com', 'scan.li.fi',
+]
+
+function allowedEmbedLink(raw) {
+  try {
+    const url = new URL(String(raw))
+    return url.protocol === 'https:' && EMBED_LINK_HOSTS.includes(url.hostname) ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+const txUrl = (hash) => (/^0x[0-9a-fA-F]{64}$/.test(String(hash || '')) ? `https://blockscan.com/tx/${hash}` : null)
+
 function SwapEmbed({ ctx, appUrl, onClose }) {
   const queryClient = useQueryClient()
   const frameRef = useRef(null)
@@ -492,6 +514,7 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
   const [mount, setMount] = useState(0)
   const [height, setHeight] = useState(560)
   const [notice, setNotice] = useState('')
+  const [resultUrl, setResultUrl] = useState(null)
   const [error, setError] = useState('')
 
   const dark = document.documentElement.classList.contains('dark')
@@ -504,6 +527,7 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
     // document the frame navigated to never saw it, so it gets nothing.
     const nonce = crypto.randomUUID()
     let lastSentAt = 0
+    let lastOpenAt = 0
     const sendToken = async (frame) => {
       lastSentAt = Date.now()
       const minted = await ctx.rest('/embed-token', { method: 'POST', body: {} })
@@ -538,9 +562,21 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
         }
       } else if (message.type === 'coinfello:embed-resize' && Number(message.height) > 0) {
         setHeight(Math.min(1200, Math.max(240, Number(message.height))))
+      } else if (message.type === 'coinfello:open-url') {
+        // The embed's own "View" links (the sandbox blocks popups): open only
+        // allowlisted https explorers, at most once a second.
+        const url = allowedEmbedLink(message.url)
+        const now = Date.now()
+        if (url && now - lastOpenAt >= 1000) {
+          lastOpenAt = now
+          ctx.os.openExternal(url)
+        }
       } else if (message.type === 'coinfello:swap-result') {
         queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
-        if (message.status === 'success') setNotice('Swap submitted.')
+        if (message.status === 'success') {
+          setNotice('Swap submitted.')
+          setResultUrl(txUrl(message.transactionHash))
+        }
       }
     }
     window.addEventListener('message', onMessage)
@@ -566,7 +602,17 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
             ],
           })
         : null,
-      notice ? jsx('div', { className: cn('text-xs', up), children: notice }) : null,
+      notice
+        ? jsxs('div', {
+            className: cn(row, 'text-xs'),
+            children: [
+              jsx('span', { className: up, children: notice }),
+              resultUrl
+                ? jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(resultUrl), children: 'View transaction' })
+                : null,
+            ],
+          })
+        : null,
       jsx(SandboxedFrame, {
         key: mount,
         ref: frameRef,
