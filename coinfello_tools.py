@@ -177,7 +177,10 @@ def _show_card(args: dict, *, session_id: str = "") -> Any:
     arguments = args.get("arguments")
     if arguments is not None and not isinstance(arguments, dict):
         raise ValueError("arguments is an object of the card's own arguments, e.g. {\"token\": \"USDC\"}")
-    return cards.show_card(args.get("card"), arguments or {}, session_id=session_id)
+    # Models often put the card's arguments beside ``card`` instead of inside
+    # ``arguments``; take those too, letting ``arguments`` win a clash.
+    stray = {key: value for key, value in args.items() if key not in ("card", "arguments")}
+    return cards.show_card(args.get("card"), {**stray, **(arguments or {})}, session_id=session_id)
 
 
 def _transfer_status(args: dict) -> Any:
@@ -553,12 +556,17 @@ _SHOW_CARD = (
         "yield ({\"token\": \"USDC\"}), lp_ranges, perp, automations, needs_you, "
         "fund; quote with {\"intent_id\"} from coinfello_prepare_swap / "
         "_prepare_send; error with {\"kind\" or \"message\", \"retry_tool\"}. "
+        "Those objects go inside `arguments`, not beside `card`. "
         "Executes nothing itself.",
         {
             "card": {"type": "string", "enum": cards.card_names(), "description": "Which card"},
             "arguments": {
                 "type": "object",
-                "description": "The card's own arguments (omit for none). Only the ones the server declares are sent.",
+                "description": (
+                    "The card's own arguments, nested here (omit for none). A whole "
+                    "call: {\"card\": \"yield\", \"arguments\": {\"token\": \"USDC\", \"chain_ids\": [8453]}}. "
+                    "Only the ones the server declares are sent."
+                ),
             },
         },
         ("card",),

@@ -115,14 +115,24 @@ def server_tools(*, refresh: bool = False) -> frozenset:
             tool.get("name", ""): frozenset(((tool.get("inputSchema") or {}).get("properties") or {}).keys())
             for tool in tools
         }
+        required = {tool.get("name", ""): _required_params(tool) for tool in tools}
         card_uris = {
             tool.get("name", ""): uri for tool in tools if (uri := _card_resource_uri(tool))
         }
         _capabilities.update(
             url=url, tools=names, descriptions=descriptions, params=params,
-            card_uris=card_uris, at=time.monotonic(),
+            required=required, card_uris=card_uris, at=time.monotonic(),
         )
     return _capabilities["tools"]
+
+
+def _required_params(tool: dict) -> tuple:
+    """The schema's ``required`` names, in the server's order."""
+    schema = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return ()
+    return tuple(name for name in required if isinstance(name, str))
 
 
 def _card_resource_uri(tool: dict) -> str:
@@ -150,6 +160,15 @@ def tool_params(tool: str) -> frozenset:
     except MCPError:
         return frozenset()
     return (_capabilities.get("params") or {}).get(tool, frozenset())
+
+
+def tool_required(tool: str) -> tuple:
+    """The argument names the server's schema for ``tool`` requires."""
+    try:
+        server_tools()
+    except MCPError:
+        return ()
+    return (_capabilities.get("required") or {}).get(tool, ())
 
 
 def supports(tool: str) -> bool:

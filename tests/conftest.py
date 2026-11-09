@@ -145,8 +145,11 @@ def _ui_meta(uri, *, flat_only=False):
     return meta
 
 
-def _props(*names):
-    return {"type": "object", "properties": {name: {"type": "string"} for name in names}}
+def _props(*names, required=()):
+    schema = {"type": "object", "properties": {name: {"type": "string"} for name in names}}
+    if required:
+        schema["required"] = list(required)
+    return schema
 
 
 CARD_TOOLS = [
@@ -159,7 +162,10 @@ CARD_TOOLS = [
     {"name": "show_automations_card", "inputSchema": _props("session_token"),
      "_meta": _ui_meta("ui://coinfello/automations-card.html")},
     # Only the deprecated flat key, like hosts before the MCP Apps rename.
-    {"name": "show_yield_card", "inputSchema": _props("token", "chain_ids", "session_token"),
+    # Requires its token, like the live server (and a session token the
+    # plugin sends as a header instead).
+    {"name": "show_yield_card", "inputSchema": _props("token", "chain_ids", "session_token",
+                                                      required=("token", "session_token")),
      "_meta": _ui_meta("ui://coinfello/yield-card.html", flat_only=True)},
     # Declares a card URI the plugin does not know: never drawn.
     {"name": "show_status_card", "inputSchema": _props("session_token"),

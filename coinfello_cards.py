@@ -218,6 +218,12 @@ def tool_arguments(tool: str, arguments: Any) -> dict:
     return {key: value for key, value in strip_secrets(arguments).items() if key in declared}
 
 
+def _missing_required(tool: str, args: dict) -> list[str]:
+    """Required arguments ``args`` lacks. A credential the schema requires is
+    not counted: the stored session is sent as a header, never an argument."""
+    return [key for key in core.tool_required(tool) if key not in args and not _is_secret(key)]
+
+
 # -- card records -----------------------------------------------------------------
 
 def cards_dir() -> Path:
@@ -420,6 +426,13 @@ def show_card(card: Any, arguments: Any = None, *, session_id: str = "", surface
             "plugin only draws the CoinFello cards it knows."
         )
     args = tool_arguments(kind.tool, arguments)
+    missing = _missing_required(kind.tool, args)
+    if missing:
+        shape = json.dumps({"card": name, "arguments": {key: "..." for key in missing}})
+        raise ValueError(
+            f"The {name} card needs {', '.join(missing)}, inside `arguments`: "
+            f"call coinfello_show_card as {shape}."
+        )
     result = strip_secrets(core.call_result(kind.tool, args))
     text = _fallback_text(result)
     if result.get("isError"):

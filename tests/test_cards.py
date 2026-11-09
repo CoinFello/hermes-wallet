@@ -114,6 +114,15 @@ def test_the_flat_ui_resourceUri_key_still_counts(server):
     assert _calls(server)[-1] == ("show_yield_card", {"token": "USDC"})
 
 
+def test_a_missing_required_argument_names_it_and_the_call_shape(server):
+    with pytest.raises(ValueError) as caught:
+        _show("yield", {"chain_ids": [8453]})
+    message = str(caught.value)
+    assert "needs token" in message and "session_token" not in message
+    assert '{"card": "yield", "arguments": {"token": "..."}}' in message
+    assert _calls(server) == []  # the server never sees the incomplete call
+
+
 def test_a_server_without_the_card_says_so(server):
     with pytest.raises(RuntimeError, match="no perp card yet"):
         _show("perp")
@@ -525,6 +534,53 @@ def test_the_tool_takes_hermes_context_keywords_and_reads_the_surface(monkeypatc
     assert out == {"ok": True, "shown": "coinfello_pane"}
     assert seen == {"card": "yield", "arguments": {"token": "USDC"}, "session_id": "sess-9", "surface": "desktop"}
     assert json.loads(handler({"card": "yield", "arguments": "USDC"}))["error"].startswith("arguments is an object")
+
+
+@pytest.fixture
+def show_tool(monkeypatch, server):
+    """coinfello_show_card's handler on the desktop surface, over the same
+    modules the ``server`` fixture points at the mock."""
+    import importlib
+    import sys
+    import types
+
+    registry = types.ModuleType("tools.registry")
+    registry.tool_error = lambda message: json.dumps({"error": message})
+    registry.tool_result = lambda payload: json.dumps(payload)
+    monkeypatch.setitem(sys.modules, "tools", types.ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.registry", registry)
+    monkeypatch.delitem(sys.modules, "coinfello_tools", raising=False)
+    tools = importlib.import_module("coinfello_tools")
+    monkeypatch.setattr(cards, "_surface_reader", lambda: "desktop")
+    name, _schema, handler = tools._SHOW_CARD
+    assert name == "coinfello_show_card"
+    return lambda args: json.loads(handler(args, session_id="sess-9"))
+
+
+def test_arguments_beside_card_are_taken_as_the_cards_own(show_tool, server):
+    # What Claude Sonnet 4.6 sent live: the yield card's arguments at the top level.
+    out = show_tool({"card": "yield", "token": "USDC", "chain_ids": [8453]})
+    assert out["shown"] == "coinfello_pane"
+    assert _calls(server)[-1] == ("show_yield_card", {"token": "USDC", "chain_ids": [8453]})
+
+
+def test_nested_arguments_win_over_the_same_key_beside_card(show_tool, server):
+    show_tool({"card": "yield", "token": "ETH", "chain_ids": [1], "arguments": {"token": "USDC"}})
+    assert _calls(server)[-1] == ("show_yield_card", {"token": "USDC", "chain_ids": [1]})
+
+
+def test_folded_arguments_lose_secrets_and_undeclared_keys(show_tool, server):
+    show_tool({"card": "yield", "token": "USDC", "session_token": "tok-model",
+               "sessionToken": "tok-model", "bogus": 1, "arguments": {"also_bogus": 2}})
+    assert _calls(server)[-1] == ("show_yield_card", {"token": "USDC"})
+    assert server.mock_state["auth_headers"][-1] == "Bearer tok-live"
+
+
+def test_a_missing_required_argument_reaches_the_model_as_a_clear_error(show_tool, server):
+    out = show_tool({"card": "yield", "chain_ids": [8453]})
+    assert "needs token, inside `arguments`" in out["error"]
+    assert "-32602" not in out["error"]
+    assert _calls(server) == []
 
 
 def test_the_tool_schema_offers_every_card_but_sign_in(monkeypatch):
