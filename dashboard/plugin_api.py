@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 # Loaded standalone by the dashboard importer (spec_from_file_location), so
 # package-relative imports are unavailable: put the plugin directory on the
@@ -26,6 +26,7 @@ if str(_PLUGIN_DIR) not in sys.path:
 from fastapi import APIRouter  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+import coinfello_cards as cards  # noqa: E402
 import coinfello_core as core  # noqa: E402
 
 router = APIRouter()
@@ -160,3 +161,44 @@ def forget_account():
         return {"ok": True}
 
     return _safe(run)
+
+
+# -- MCP App cards (coinfello_show_card) -----------------------------------------
+# The pane mounts each card in a sandboxed frame and relays its bridge here.
+# coinfello_cards decides what a card may call; /call never runs a tool that
+# moves funds, it returns the confirmation, and only /execute (the pane's
+# Confirm button) runs it.
+
+
+class CardCallBody(BaseModel):
+    tool: str
+    arguments: Optional[Dict[str, Any]] = None
+
+
+class CardExecuteBody(BaseModel):
+    confirm_id: str
+
+
+@router.get("/cards")
+def cards_list():
+    return _safe(lambda: {"ok": True, "cards": cards.list_cards()})
+
+
+@router.get("/cards/{card_id}")
+def card_document(card_id: str, theme: Optional[str] = None):
+    return _safe(lambda: cards.card_document(card_id, theme or ""))
+
+
+@router.post("/cards/{card_id}/call")
+def card_call(card_id: str, body: CardCallBody):
+    return _safe(lambda: cards.card_call(card_id, body.tool, body.arguments or {}))
+
+
+@router.post("/cards/{card_id}/execute")
+def card_execute(card_id: str, body: CardExecuteBody):
+    return _safe(lambda: cards.card_execute(card_id, body.confirm_id))
+
+
+@router.post("/cards/{card_id}/dismiss")
+def card_dismiss(card_id: str):
+    return _safe(lambda: cards.dismiss_card(card_id))

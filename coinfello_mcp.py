@@ -19,6 +19,12 @@ PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "hermes-coinfello-plugin", "version": "0.1.0"}
 
 
+#: The only MCP App resources the plugin renders: CoinFello's own cards.
+CARD_URI_PREFIX = "ui://coinfello/"
+#: MCP Apps (SEP-1865) HTML resource type.
+CARD_MIME = "text/html;profile=mcp-app"
+
+
 class MCPError(Exception):
     """Transport- or protocol-level failure (unreachable, bad response)."""
 
@@ -37,6 +43,21 @@ def _header(headers: dict, name: str) -> str | None:
         if str(key).lower() == lowered:
             return value
     return None
+
+
+def is_card_mime(value) -> bool:
+    """``text/html;profile=mcp-app``, ignoring case and spacing."""
+    return isinstance(value, str) and value.replace(" ", "").lower() == CARD_MIME
+
+
+def result_text(result: dict) -> str:
+    """The text blocks of a CallToolResult, joined."""
+    content = (result or {}).get("content") or []
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
 
 
 def _parse_sse(text: str) -> list:
@@ -164,6 +185,12 @@ class CoinFelloMCP:
                 "method": "initialize",
                 "params": {
                     "protocolVersion": PROTOCOL_VERSION,
+                    # Deliberately NOT advertising the MCP Apps extension
+                    # (io.modelcontextprotocol/ui): a server that sees it
+                    # sends card tools a headline instead of the full text,
+                    # and one plugin process serves desktop (card on screen)
+                    # and Telegram/CLI (no card) alike. Card results always
+                    # carry structuredContent, which is all the card needs.
                     "capabilities": {},
                     "clientInfo": CLIENT_INFO,
                 },
@@ -223,8 +250,13 @@ class CoinFelloMCP:
         result = (message or {}).get("result") or {}
         return result.get("tools") or []
 
-    def call_tool(self, name: str, arguments: dict | None = None, *, _retry: bool = True):
-        """Call a tool; returns the parsed JSON payload, or the plain text."""
+    def call_tool_result(self, name: str, arguments: dict | None = None, *, _retry: bool = True) -> dict:
+        """Call a tool; returns the raw CallToolResult (``content``,
+        ``structuredContent``, ``isError``), without raising on ``isError``.
+
+        MCP App cards need the result exactly as the server sent it: the card
+        renders ``structuredContent`` and handles its own tool errors.
+        """
         self.ensure_initialized()
         try:
             message = self._rpc("tools/call", {"name": name, "arguments": dict(arguments or {})})
@@ -232,16 +264,16 @@ class CoinFelloMCP:
             if not _retry:
                 raise
             self.initialize()
-            return self.call_tool(name, arguments, _retry=False)
+            return self.call_tool_result(name, arguments, _retry=False)
         if message is None:
             raise MCPError(f"{name}: no response from server")
-        result = message.get("result") or {}
-        content = result.get("content") or []
-        text = "\n".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def call_tool(self, name: str, arguments: dict | None = None, *, _retry: bool = True):
+        """Call a tool; returns the parsed JSON payload, or the plain text."""
+        result = self.call_tool_result(name, arguments, _retry=_retry)
+        text = result_text(result)
         if result.get("isError"):
             raise ToolError(text or f"{name}: tool reported an error without detail")
         if not text:
@@ -250,3 +282,32 @@ class CoinFelloMCP:
             return json.loads(text)
         except ValueError:
             return text
+
+    def read_resource(self, uri: str) -> dict:
+        """Read one CoinFello MCP App card document (``resources/read``).
+
+        Only ``ui://coinfello/`` URIs, and only the MCP Apps HTML type: this
+        is the one kind of resource the plugin renders, and anything else
+        (another server's card, a plain web page) is refused before it could
+        reach a frame. Returns ``{"uri", "text", "_meta"}``.
+        """
+        if not isinstance(uri, str) or not uri.startswith(CARD_URI_PREFIX) or ".." in uri:
+            raise MCPError(f"refusing to read {uri!r}: only {CARD_URI_PREFIX} cards are rendered")
+        self.ensure_initialized()
+        try:
+            message = self._rpc("resources/read", {"uri": uri})
+        except SessionExpired:
+            self.initialize()
+            message = self._rpc("resources/read", {"uri": uri})
+        contents = ((message or {}).get("result") or {}).get("contents") or []
+        for item in contents:
+            if not isinstance(item, dict) or item.get("uri") != uri:
+                continue
+            if not is_card_mime(item.get("mimeType")):
+                raise MCPError(f"{uri} is {item.get('mimeType')!r}, not an MCP App card")
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise MCPError(f"{uri} has no HTML")
+            meta = item.get("_meta")
+            return {"uri": uri, "text": text, "_meta": meta if isinstance(meta, dict) else {}}
+        raise MCPError(f"{uri}: the server returned no card document")

@@ -18,12 +18,12 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:  # package import inside Hermes; plain import in tests / standalone use
-    from .coinfello_mcp import CoinFelloMCP, MCPError, ToolError  # noqa: F401 (re-exported)
+    from .coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # noqa: F401 (re-exported)
     from .coinfello_portfolio import qr_svg_data_uri, shape_portfolio
     from .coinfello_state import (
         clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
 except ImportError:  # pragma: no cover
-    from coinfello_mcp import CoinFelloMCP, MCPError, ToolError  # type: ignore[no-redef]
+    from coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # type: ignore[no-redef]
     from coinfello_portfolio import qr_svg_data_uri, shape_portfolio  # type: ignore[no-redef]
     from coinfello_state import (  # type: ignore[no-redef]
         clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
@@ -115,10 +115,41 @@ def server_tools(*, refresh: bool = False) -> frozenset:
             tool.get("name", ""): frozenset(((tool.get("inputSchema") or {}).get("properties") or {}).keys())
             for tool in tools
         }
+        card_uris = {
+            tool.get("name", ""): uri for tool in tools if (uri := _card_resource_uri(tool))
+        }
         _capabilities.update(
-            url=url, tools=names, descriptions=descriptions, params=params, at=time.monotonic()
+            url=url, tools=names, descriptions=descriptions, params=params,
+            card_uris=card_uris, at=time.monotonic(),
         )
     return _capabilities["tools"]
+
+
+def _card_resource_uri(tool: dict) -> str:
+    """The MCP App card a tool renders into: ``_meta.ui.resourceUri`` (the
+    MCP Apps key), else the deprecated flat ``_meta["ui/resourceUri"]``."""
+    meta = tool.get("_meta") if isinstance(tool.get("_meta"), dict) else {}
+    ui = meta.get("ui") if isinstance(meta.get("ui"), dict) else {}
+    uri = ui.get("resourceUri") or meta.get("ui/resourceUri")
+    return uri if isinstance(uri, str) else ""
+
+
+def card_resource_uri(tool: str) -> str:
+    """The card URI the server declared for ``tool`` ("" when none)."""
+    try:
+        server_tools()
+    except MCPError:
+        return ""
+    return (_capabilities.get("card_uris") or {}).get(tool, "")
+
+
+def tool_params(tool: str) -> frozenset:
+    """The argument names the server's schema declares for ``tool``."""
+    try:
+        server_tools()
+    except MCPError:
+        return frozenset()
+    return (_capabilities.get("params") or {}).get(tool, frozenset())
 
 
 def supports(tool: str) -> bool:
@@ -243,6 +274,37 @@ def call(name: str, payload: dict | None = None, *, timeout: float = 90.0):
     client = _client(timeout=timeout)
     client.session_token = token
     return client.call_tool(name, payload)
+
+
+def call_result(name: str, payload: dict | None = None, *, timeout: float = 90.0) -> dict:
+    """``call``, returning the raw CallToolResult (no raise on ``isError``).
+
+    For MCP App cards, which render the result exactly as the server sent it.
+    Always the stored session: a card never supplies a token.
+    """
+    payload = {k: v for k, v in dict(payload or {}).items() if k != "session_token"}
+    token = _resolve_token({})
+    client = _client(timeout=timeout)
+    client.session_token = token
+    return client.call_tool_result(name, payload)
+
+
+def trading_call_result(name: str, payload: dict | None = None, *, timeout: float = 90.0) -> dict:
+    """``trading_call`` for card relays: the same read-only handling, raw result."""
+    if load_state().get("access") == "read_only":
+        raise NeedsTradingAccess()
+    result = call_result(name, payload, timeout=timeout)
+    if result.get("isError") and _is_read_only_refusal(Exception(result_text(result))):
+        save_state({"access": "read_only", "daily_limit_usd": None})
+        raise NeedsTradingAccess()
+    return result
+
+
+def read_card_resource(uri: str) -> dict:
+    """One ``ui://coinfello/`` card document (see ``CoinFelloMCP.read_resource``)."""
+    client = _client(timeout=20.0)
+    client.session_token = (maybe_renew().get("session_token") or "").strip() or None
+    return client.read_resource(uri)
 
 
 # -- sign-in -----------------------------------------------------------------

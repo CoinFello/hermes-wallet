@@ -64,6 +64,15 @@ def recall_intent(intent_id: str) -> dict | None:
     return entry["summary"]
 
 
+def intent_seconds_left(intent_id: str) -> int:
+    """Seconds until a cached intent stops being executable (0 when gone)."""
+    with _intents_lock:
+        entry = _intents.get(intent_id)
+    if not entry:
+        return 0
+    return max(0, int(entry["expires"] - time.monotonic()))
+
+
 def forget_intent(intent_id: str) -> None:
     with _intents_lock:
         _intents.pop(intent_id, None)

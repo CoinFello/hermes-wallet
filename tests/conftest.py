@@ -117,6 +117,99 @@ EMBED_TOKEN = {
 }
 
 
+# MCP App cards ------------------------------------
+
+CARD_MIME = "text/html;profile=mcp-app"
+MODEL_NOTE = (
+    "Model note: the host shows the card above your reply, at this tool call. "
+    "The card is the list."
+)
+CARD_HTML = (
+    '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora">\n'
+    "</head>\n<body><div class=\"card\" id=\"root\"></div>"
+    "<script>parent.postMessage({jsonrpc: '2.0', id: 1, method: 'ui/initialize'}, '*')</script>"
+    "</body>\n</html>"
+)
+CARD_RESOURCE_META = {"ui": {"prefersBorder": True, "csp": {"resourceDomains": [
+    "https://fonts.googleapis.com", "https://fonts.gstatic.com",
+    "http://insecure.test", "https://evil.test; script-src *", 42,
+]}}}
+RETRYABLE = {"get_balances", "get_positions", "prepare_swap", "whoami"}
+
+
+def _ui_meta(uri, *, flat_only=False):
+    meta = {"ui/resourceUri": uri}
+    if not flat_only:
+        meta["ui"] = {"resourceUri": uri, "visibility": ["model", "app"]}
+    return meta
+
+
+def _props(*names):
+    return {"type": "object", "properties": {name: {"type": "string"} for name in names}}
+
+
+CARD_TOOLS = [
+    {"name": "show_portfolio_card", "inputSchema": _props("chain_ids", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/portfolio-card.html")},
+    {"name": "show_quote_card", "inputSchema": _props("intent_id", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/quote-card.html")},
+    {"name": "show_error_card", "inputSchema": _props("kind", "message", "retry_tool", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/error-card.html")},
+    {"name": "show_automations_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://coinfello/automations-card.html")},
+    # Only the deprecated flat key, like hosts before the MCP Apps rename.
+    {"name": "show_yield_card", "inputSchema": _props("token", "chain_ids", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/yield-card.html", flat_only=True)},
+    # Declares a card URI the plugin does not know: never drawn.
+    {"name": "show_status_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://elsewhere/status-card.html")},
+    {"name": "show_sign_in_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://coinfello/sign-in-card.html")},
+    {"name": "pause_automation", "inputSchema": _props("trigger_id", "session_token")},
+    {"name": "cancel_automation", "inputSchema": _props("trigger_id", "session_token")},
+    {"name": "get_positions", "inputSchema": _props("session_token")},
+]
+CARD_TRADE_SCHEMAS = {
+    "prepare_swap": _props("from_chain_id", "from_token", "to_chain_id", "to_token", "amount", "slippage", "session_token"),
+    "prepare_send": _props("chain_id", "token", "amount", "recipient", "session_token"),
+    "execute_intent": _props("intent_id", "session_token"),
+    "get_balances": _props("chain_ids", "session_token"),
+}
+AUTOMATION_ROWS = [
+    {"id": "trg-1", "name": "Weekly ETH", "summary": "Buys $10 of ETH every week", "whyPaused": None},
+]
+
+
+def _card_result(text, data):
+    return {"content": [{"type": "text", "text": f"{MODEL_NOTE}\n{text}"}], "structuredContent": data}
+
+
+def _card_tool(name, arguments):
+    """The mock's show_*_card answers, or None for any other tool."""
+    if name == "show_portfolio_card":
+        return _card_result(
+            "Portfolio: $2,500.00\nUSDC on Base: $1,000.00\nETH on Ethereum: $1,500.00",
+            {"totalValueUsd": 2500.0, "session_token": "tok-leaked",
+             "nested": {"embedToken": "cfemb_leaked", "token": "USDC"}},
+        )
+    if name == "show_quote_card":
+        return _card_result("Bridge 0.004186 ETH to POL.", {"kind": "bridge", "intentId": arguments.get("intent_id")})
+    if name == "show_error_card":
+        retry = arguments.get("retry_tool")
+        return _card_result("Network did not answer.", {
+            "kind": "network", "retryTool": retry if retry in RETRYABLE else None, "retryArgs": {}})
+    if name == "show_automations_card":
+        return _card_result("1 open automation.\nWeekly ETH", {"rows": AUTOMATION_ROWS, "note": None})
+    if name in ("show_yield_card", "show_status_card", "show_sign_in_card"):
+        return _card_result(f"{name} text", {"rows": []})
+    if name in ("pause_automation", "cancel_automation"):
+        return _tool_result({"ok": True, "trigger_id": arguments.get("trigger_id")})
+    if name == "get_positions":
+        return _tool_result({"defi": []})
+    return None
+
+
 def _access_for(authorization, state):
     override = state.get("access_override", {}).get(authorization)
     if override is not None:
@@ -189,6 +282,14 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             self._handle_tool(message.get("id"), name, arguments)
             return
 
+        if method == "resources/read":
+            uri = (message.get("params") or {}).get("uri", "")
+            self.state["resource_reads"].append(uri)
+            item = {"uri": self.state["resource_uri_override"] or uri,
+                    "mimeType": self.state["resource_mime"], "text": CARD_HTML, "_meta": CARD_RESOURCE_META}
+            self._json(200, _rpc_response(message.get("id"), {"contents": [item]}))
+            return
+
         if method == "tools/list":
             self.state["list_calls"] += 1
             tools = [{"name": name, "inputSchema": {"type": "object"}} for name in BASE_TOOLS]
@@ -218,6 +319,9 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                           for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
             if self.state["transfer_status"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in STATUS_TOOLS]
+            if self.state["cards"]:
+                tools = [{**tool, "inputSchema": CARD_TRADE_SCHEMAS.get(tool["name"], tool["inputSchema"])}
+                         for tool in tools] + CARD_TOOLS
             self._json(200, _rpc_response(message.get("id"), {"tools": tools}))
             return
 
@@ -267,6 +371,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
 
     def _handle_tool(self, message_id, name, arguments):
         state = self.state
+        card = _card_tool(name, arguments) if state["cards"] else None
+        if card is not None:
+            self._json(200, _rpc_response(message_id, card))
+            return
         if name == "start_browser_sign_in" and state["browser_sign_in"]:
             self._json(200, _rpc_response(message_id, _tool_result(BROWSER_SIGN_IN)))
             return
@@ -466,6 +574,11 @@ def mock_mcp(monkeypatch):
         "route_changed": False,
         "outcome_unknown": False,
         "transfer_status": False,
+        # MCP App cards: show_*_card tools with _meta.ui and resources/read.
+        "cards": False,
+        "resource_reads": [],
+        "resource_mime": CARD_MIME,
+        "resource_uri_override": "",
     }
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
