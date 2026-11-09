@@ -1,0 +1,7 @@
+{
+  "name": "coinfello",
+  "label": "CoinFello",
+  "description": "CoinFello wallet + Fello DeFi agent: sign-in, balances and reads through the CoinFello MCP server",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

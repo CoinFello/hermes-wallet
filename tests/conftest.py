@@ -1,0 +1,386 @@
+"""Test fixtures: a local mock of the CoinFello MCP server.
+
+Implements just enough of the streamable-HTTP MCP transport to exercise the
+plugin's client: initialize (issues a session id), notifications/initialized,
+tools/call with canned sign-in/read results, SSE-encoded responses, and
+session invalidation for the 404-retry path.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+import pytest  # noqa: E402
+
+# canned tool results ---------------------------------------------------------
+
+CODE_SENT = f"A login code was sent. Expires in a few minutes."
+
+SESSION = {
+    "session_token": "tok-abc123",
+    "wallet_address": "0xWALLET",
+    "expires_at": "2026-11-17T00:00:00Z",
+    "next": "Call fello_chat with a message describing what you want done.",
+}
+
+APPROVAL_REQUIRED = {
+    "approval_required": True,
+    "approval_url": "https://example.test/authorize",
+    "approval_id": "11111111-1111-1111-1111-111111111111",
+    "expires_in_seconds": 600,
+    "next": "Give the human approval_url to open in a browser.",
+}
+
+PENDING = {"status": "pending", "next": "Not approved yet. Call again."}
+
+BALANCES = {
+    "tokens": [
+        {"chainId": 8453, "symbol": "USDC", "balance": "1000", "valueUsd": 1000.0},
+        {"chainId": 1, "symbol": "ETH", "balance": "0.5", "valueUsd": 1500.0},
+    ],
+    "totalValueUsd": 2500.0,
+}
+
+BALANCES_TEXT = json.dumps(BALANCES)
+
+WHOAMI = {"wallet_address": "0xWALLET", "expires_at": "2026-11-17T00:00:00Z"}
+
+BROWSER_SIGN_IN = {
+    "approval_url": "https://example.test/authorize?user_code=WDJB-MJHT",
+    "user_code": "WDJB-MJHT",
+    "approval_id": "22222222-2222-2222-2222-222222222222",
+    "expires_in_seconds": 600,
+    "next": "Show the human user_code and give them approval_url.",
+}
+
+RENEWED = {
+    "session_token": "tok-renewed",
+    "wallet_address": "0xWALLET",
+    "expires_at": "2099-01-01T00:00:00Z",
+}
+
+BASE_TOOLS = (
+    "privy_send_login_code", "privy_verify_login_code", "privy_complete_approval",
+    "whoami", "sign_out", "fello_chat", "fello_job_status", "get_balances",
+)
+
+ACTION_TOOLS = ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
+# Added after a bridge incident.
+STATUS_TOOLS = ("get_transfer_status",)
+
+PREPARED_BRIDGE = {
+    "intentId": "66666666-6666-6666-6666-666666666666",
+    "expiresInSeconds": 120,
+    "summary": {
+        "kind": "bridge", "fromChainId": 1, "toChainId": 137,
+        "fromChainName": "Ethereum Mainnet", "toChainName": "Polygon",
+        "from": {"symbol": "ETH", "address": "0x0000000000000000000000000000000000000000",
+                 "amount": "0.004186", "valueUsd": 10.0},
+        "to": {"symbol": "POL", "address": "0x0000000000000000000000000000000000000000",
+               "amount": "113.82", "minimumAmount": "113.25", "valueUsd": 10.28},
+        "slippage": 0.005, "gasUsd": 0.12, "feesUsd": 0.06, "valueLossPct": -2.8,
+        "estimatedSeconds": 18, "bridges": ["layerswap"],
+    },
+}
+
+TRANSFER_WRONG_TOKEN = {
+    "txHash": "0x" + "3e" * 32, "status": "DONE", "substatus": "PARTIAL",
+    "outcome": "wrong_token", "deliveredRequestedToken": False, "tool": "across",
+    "received": {"chainId": 137, "symbol": "WETH", "amount": "0.004149590496376045"},
+}
+
+PREPARED_SEND = {
+    "intentId": "33333333-3333-3333-3333-333333333333",
+    "expiresInSeconds": 120,
+    "summary": {
+        "kind": "send", "chainId": 8453, "chainName": "Base",
+        "token": {"symbol": "USDC", "address": "0xUSDC", "decimals": 6},
+        "amount": "25.5", "valueUsd": 25.5,
+        "recipient": "0x1111111111111111111111111111111111111111",
+    },
+}
+
+EMBED_TOKEN = {
+    "embed_token": "cfemb_test",
+    "expires_at": "2099-01-01T00:15:00Z",
+    "embed_url": "https://app.coinfello.test/embed/swap",
+}
+
+
+def _tool_result(payload, *, error=False):
+    if isinstance(payload, str):
+        content = [{"type": "text", "text": payload}]
+    else:
+        content = [{"type": "text", "text": json.dumps(payload)}]
+    return {"content": content, **({"isError": True} if error else {})}
+
+
+def _rpc_response(message_id, result):
+    return {"jsonrpc": "2.0", "id": message_id, "result": result}
+
+
+class MockMCPHandler(BaseHTTPRequestHandler):
+    server_version = "MockCoinFelloMCP/0.1"
+
+    # state shared across instances via the server object
+    @property
+    def state(self):
+        return self.server.mock_state
+
+    def log_message(self, *args):  # silence the request log
+        pass
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        try:
+            message = json.loads(raw)
+        except ValueError:
+            self._json(400, {"error": "bad json"})
+            return
+
+        method = message.get("method", "")
+        if method == "initialize":
+            self.state["initialize_calls"] += 1
+            self._json(
+                200,
+                _rpc_response(message.get("id"), {
+                    "protocolVersion": "2025-06-18",
+                    "serverInfo": {"name": "coinfello", "version": "1.0.0"},
+                }),
+                session_id=self.state["session_id"],
+            )
+            return
+
+        if method == "notifications/initialized":
+            self.state["initialized_notices"] += 1
+            self._empty(202)
+            return
+
+        # every other method requires the live session id
+        if self.headers.get("Mcp-Session-Id") != self.state["session_id"]:
+            self._empty(404)
+            return
+
+        if method == "tools/call":
+            name = (message.get("params") or {}).get("name", "")
+            arguments = (message.get("params") or {}).get("arguments") or {}
+            self.state["tool_calls"].append((name, arguments))
+            self.state["auth_headers"].append(self.headers.get("Authorization"))
+            self._handle_tool(message.get("id"), name, arguments)
+            return
+
+        if method == "tools/list":
+            self.state["list_calls"] += 1
+            tools = [{"name": name, "inputSchema": {"type": "object"}} for name in BASE_TOOLS]
+            if self.state["browser_sign_in"]:
+                tools += [
+                    {"name": name, "inputSchema": {"type": "object"}}
+                    for name in ("start_browser_sign_in", "renew_session")
+                ]
+            if self.state["actions"]:
+                tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
+            if self.state["transfer_status"]:
+                tools += [{"name": name, "inputSchema": {"type": "object"}} for name in STATUS_TOOLS]
+            self._json(200, _rpc_response(message.get("id"), {"tools": tools}))
+            return
+
+        self._json(400, {"error": f"unsupported method {method}"})
+
+    def _handle_tool(self, message_id, name, arguments):
+        state = self.state
+        if name == "start_browser_sign_in" and state["browser_sign_in"]:
+            self._json(200, _rpc_response(message_id, _tool_result(BROWSER_SIGN_IN)))
+            return
+        if name == "renew_session" and state["browser_sign_in"]:
+            self._json(200, _rpc_response(message_id, _tool_result(RENEWED)))
+            return
+        if name == "sign_out":
+            time.sleep(state["sign_out_delay"])
+            state["signed_out_tokens"].append(self.headers.get("Authorization"))
+            self._json(200, _rpc_response(message_id, _tool_result("Signed out.")))
+            return
+        if name == "prepare_send" and state["actions"]:
+            if not str(arguments.get("recipient", "")).startswith("0x"):
+                self._json(200, _rpc_response(
+                    message_id, _tool_result('recipient must be a 0x address; got "bob".', error=True)))
+                return
+            self._json(200, _rpc_response(message_id, _tool_result(PREPARED_SEND)))
+            return
+        if name == "prepare_swap" and state["actions"]:
+            self._json(200, _rpc_response(message_id, _tool_result(PREPARED_BRIDGE)))
+            return
+        if name == "get_transfer_status" and state["transfer_status"]:
+            self._json(200, _rpc_response(message_id, _tool_result(TRANSFER_WRONG_TOKEN)))
+            return
+        if name == "execute_intent" and state["actions"]:
+            intent = arguments.get("intent_id")
+            if intent in state["used_intents"]:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    "This confirmation expired or was already used. Prepare it again.", error=True)))
+                return
+            state["used_intents"].append(intent)
+            if state["outcome_unknown"]:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    {"success": False, "kind": "swap", "outcomeUnknown": True,
+                     "transactionHash": "0xbroadcast",
+                     "error": "The swap was broadcast (tx 0xbroadcast) but its outcome could not be confirmed. Do not retry."},
+                    error=True)))
+                return
+            if state["route_changed"]:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    {"success": False, "kind": "bridge", "routeChanged": True,
+                     "error": "The approved route went through layerswap, which no longer offers this transfer."},
+                    error=True)))
+                return
+            if state["price_moved"]:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    {"success": False, "kind": "swap", "priceMoved": True,
+                     "error": "The price moved since this swap was approved."}, error=True)))
+                return
+            self._json(200, _rpc_response(message_id, _tool_result(
+                {"success": True, "kind": "send", "transactionHash": "0xabc123"})))
+            return
+        if name == "create_embed_token" and state["actions"]:
+            self._json(200, _rpc_response(message_id, _tool_result(EMBED_TOKEN)))
+            return
+        if name == "expire_session":
+            state["session_id"] = f"sess-{state['generation'] + 1}"
+            state["generation"] += 1
+            self._json(200, _rpc_response(message_id, _tool_result("session expired")))
+            return
+        if name == "privy_send_login_code":
+            self._json(200, _rpc_response(message_id, _tool_result(CODE_SENT)))
+            return
+        if name == "privy_verify_login_code":
+            if arguments.get("email") == "approval@example.com":
+                self._json(200, _rpc_response(message_id, _tool_result(APPROVAL_REQUIRED)))
+            elif arguments.get("code") == "111111":
+                self._json(200, _rpc_response(message_id, _tool_result(SESSION)))
+            else:
+                self._json(
+                    200,
+                    _rpc_response(
+                        message_id,
+                        _tool_result("Sign-in failed: wrong code.", error=True),
+                    ),
+                )
+            return
+        if name == "privy_complete_approval":
+            approval_id = arguments.get("approval_id", "")
+            if approval_id.startswith("2222"):  # a browser sign-in
+                payload = SESSION if state["browser_approved"] else PENDING
+                self._json(200, _rpc_response(message_id, _tool_result(payload)))
+            elif approval_id.startswith("1111"):
+                self._json(200, _rpc_response(message_id, _tool_result(PENDING)))
+            elif arguments.get("approval_id") == "done-approval":
+                self._json(200, _rpc_response(message_id, _tool_result(SESSION)))
+            else:
+                self._json(
+                    200,
+                    _rpc_response(message_id, _tool_result("expired approval", error=True)),
+                )
+            return
+        if name == "whoami":
+            self._json(200, _rpc_response(message_id, _tool_result(WHOAMI)))
+            return
+        if name == "get_balances":
+            if state["sse_mode"]:
+                self._sse(message_id, _tool_result(BALANCES_TEXT))
+            else:
+                self._json(200, _rpc_response(message_id, _tool_result(BALANCES_TEXT)))
+            return
+        if name == "boom":
+            self._json(
+                200,
+                _rpc_response(message_id, _tool_result("boom failed", error=True)),
+            )
+            return
+        self._json(
+            200,
+            _rpc_response(message_id, _tool_result(f"unknown tool {name}", error=True)),
+        )
+
+    # -- responders ------------------------------------------------------------
+
+    def _json(self, status, payload, session_id=None):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        if session_id:
+            self.send_header("Mcp-Session-Id", session_id)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _sse(self, message_id, result):
+        event = (
+            "event: message\n"
+            f"data: {json.dumps(_rpc_response(message_id, result))}\n\n"
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(event)))
+        self.end_headers()
+        self.wfile.write(event)
+
+    def _empty(self, status):
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+@pytest.fixture
+def mock_mcp(monkeypatch):
+    """A live mock MCP server on a random port; yields its base URL."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockMCPHandler)
+    server.mock_state = {
+        "session_id": "sess-1",
+        "generation": 1,
+        "initialize_calls": 0,
+        "initialized_notices": 0,
+        "tool_calls": [],
+        "auth_headers": [],
+        "list_calls": 0,
+        "sse_mode": False,
+        # Servers deployed before browser sign-in offer neither of its tools;
+        # tests opt in to the new server shape.
+        "browser_sign_in": False,
+        "browser_approved": False,
+        "sign_out_delay": 0.0,
+        "signed_out_tokens": [],
+        # Older servers have no send/swap/embed tools.
+        "actions": False,
+        "used_intents": [],
+        "price_moved": False,
+        "route_changed": False,
+        "outcome_unknown": False,
+        "transfer_status": False,
+    }
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def isolated_state(monkeypatch, tmp_path):
+    """Force the file fallback for state storage, in a temp directory."""
+    import coinfello_core
+    import coinfello_state
+
+    fallback = tmp_path / "state.json"
+    monkeypatch.setattr(coinfello_state, "FALLBACK_FILE", fallback)
+    monkeypatch.setattr(coinfello_state, "_auth_helpers", lambda: None)
+    # Capability probes are cached per process; every test starts cold.
+    coinfello_core._capabilities.update(url=None, tools=frozenset(), at=0.0)
+    yield fallback

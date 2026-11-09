@@ -1,0 +1,61 @@
+"""hermes-coinfello — CoinFello wallet + Fello DeFi agent tools for Hermes Agent.
+
+Signs in through the CoinFello MCP server (Privy email code, desktop pane
+assisted) and exposes the automation wallet to the agent: fast reads
+(balances, positions, prices, yields, quotes) and Fello, CoinFello's DeFi
+agent, which can execute on-chain actions.
+
+Wiring goes only through the public plugin API (``ctx.register_tool`` and
+``ctx.register_hook``). The ``pre_tool_call`` hook sends every tool call that
+can move funds (``coinfello_execute``, ``coinfello_chat``) through Hermes'
+human-approval gate, so a model cannot trade without a person approving it.
+"""
+
+from __future__ import annotations
+
+try:
+    from . import coinfello_tools as _t
+    from . import coinfello_trades as _trades
+except ImportError:  # pragma: no cover
+    # Imported without a parent package (e.g. pytest walking the repo root).
+    # Hermes itself always loads this file as the ``coinfello`` package.
+    _t = None
+    _trades = None
+
+
+TOOLSET = "coinfello"
+
+
+def register(ctx) -> None:
+    """Plugin entry point — called by the Hermes plugin loader."""
+    if _t is None:
+        raise RuntimeError(
+            "coinfello: loaded outside its package; install as "
+            "~/.hermes/plugins/coinfello/"
+        )
+    for name, schema, handler in _t.TOOLS:
+        ctx.register_tool(
+            name=name,
+            toolset=TOOLSET,
+            schema=schema,
+            handler=handler,
+            check_fn=_t.available,
+            emoji="🪙",
+        )
+    ctx.register_hook("pre_tool_call", _require_human_approval)
+
+
+def _require_human_approval(tool_name: str = "", args: dict | None = None, **_: object):
+    """Escalate fund-moving calls to the human (see coinfello_trades)."""
+    try:
+        return _trades.approval_directive(tool_name, args)
+    except Exception:  # fail closed: never let a hook bug wave a trade through
+        if tool_name in ("coinfello_execute", "coinfello_chat"):
+            return {
+                "action": "block",
+                "message": f"{tool_name} blocked: the CoinFello approval check failed.",
+            }
+        return None
+
+
+__all__ = ["register"]
