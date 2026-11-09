@@ -205,6 +205,12 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                     {"name": name, "inputSchema": {"type": "object"}}
                     for name in ("start_browser_sign_in", "renew_session")
                 ]
+                if self.state["account_hint"]:
+                    for tool in tools:
+                        if tool["name"] == "start_browser_sign_in":
+                            tool["inputSchema"] = {"type": "object", "properties": {
+                                "expected_wallet": {"type": "string"},
+                                "expected_email": {"type": "string"}}}
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
             if self.state["limit_mode"]:
@@ -447,6 +453,8 @@ def mock_mcp(monkeypatch):
         "refused_read_only": [],
         # Adjustable limits (the follow-up to access levels): off = servers without them.
         "limit_mode": False,
+        # start_browser_sign_in advertises expected_wallet / expected_email.
+        "account_hint": False,
         "access_override": {},
         "limit_changes": {},
         "sign_out_delay": 0.0,

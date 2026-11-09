@@ -847,14 +847,32 @@ function BrowserSignIn({ ctx, status, refresh }) {
 
   if (pendingCode) return jsx(PendingSignIn, { ctx, status, refresh, upgrade: false })
 
+  const forgetAccount = async () => {
+    await ctx.rest('/forget-account', { method: 'POST', body: {} })
+    refresh()
+  }
+
   return jsxs('div', {
     className: 'flex flex-col gap-2',
     children: [
       jsx('div', {
         className: cn('text-xs', muted),
         children:
-          'Sign in once in your browser — if you are already signed in to CoinFello there, it is one click. ' +
+          'Sign in once in your browser with your CoinFello email or phone. ' +
           'Approving lets Fello act on your automations wallet, the same permission as the Automation Wallet in the app (revocable there).',
+      }),
+      status.account_hint
+        ? jsxs('div', {
+            className: cn(row, 'text-[0.6875rem]', muted),
+            children: [
+              jsx('span', { children: `Signing in as ${status.account_hint}` }),
+              jsx(Button, { size: 'sm', variant: 'ghost', onClick: forgetAccount, children: 'Use a different account' }),
+            ],
+          })
+        : null,
+      jsx('div', {
+        className: cn('text-[0.6875rem]', muted),
+        children: 'If your browser asks to connect or sign with a wallet like MetaMask, cancel it: that is a different account.',
       }),
       jsx(Button, { size: 'sm', loading: busy, onClick: start, children: 'Sign in with CoinFello' }),
       error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,

@@ -20,12 +20,13 @@ from urllib.parse import urlsplit
 try:  # package import inside Hermes; plain import in tests / standalone use
     from .coinfello_mcp import CoinFelloMCP, MCPError, ToolError  # noqa: F401 (re-exported)
     from .coinfello_portfolio import qr_svg_data_uri, shape_portfolio
-    from .coinfello_state import clear_state, load_state, mcp_url, save_state, signed_in
+    from .coinfello_state import (
+        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
 except ImportError:  # pragma: no cover
     from coinfello_mcp import CoinFelloMCP, MCPError, ToolError  # type: ignore[no-redef]
     from coinfello_portfolio import qr_svg_data_uri, shape_portfolio  # type: ignore[no-redef]
     from coinfello_state import (  # type: ignore[no-redef]
-        clear_state, load_state, mcp_url, save_state, signed_in)
+        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
 
 #: Renew once the session has less than this left (the server issues 30 days).
 RENEW_WITHIN_SECONDS = 14 * 24 * 60 * 60
@@ -110,8 +111,12 @@ def server_tools(*, refresh: bool = False) -> frozenset:
         tools = _client(timeout=20.0).list_tools()
         names = frozenset(tool.get("name", "") for tool in tools)
         descriptions = {tool.get("name", ""): tool.get("description") or "" for tool in tools}
+        params = {
+            tool.get("name", ""): frozenset(((tool.get("inputSchema") or {}).get("properties") or {}).keys())
+            for tool in tools
+        }
         _capabilities.update(
-            url=url, tools=names, descriptions=descriptions, at=time.monotonic()
+            url=url, tools=names, descriptions=descriptions, params=params, at=time.monotonic()
         )
     return _capabilities["tools"]
 
@@ -121,6 +126,33 @@ def supports(tool: str) -> bool:
         return tool in server_tools()
     except MCPError:
         return False
+
+
+def accepts_param(tool: str, param: str) -> bool:
+    """True when the server's schema for ``tool`` declares ``param``; never
+    send an argument an older server has not advertised."""
+    try:
+        server_tools()
+    except MCPError:
+        return False
+    return param in (_capabilities.get("params") or {}).get(tool, frozenset())
+
+
+def mask_email(value: str) -> str:
+    """j…@example.com: enough to recognize your account on screen."""
+    if "@" not in (value or ""):
+        return value or ""
+    name, domain = value.split("@", 1)
+    return f"{name[:1]}…@{domain}"
+
+
+def account_hint() -> dict:
+    """The account this plugin last used (non-secret), for the next sign-in."""
+    state = load_state()
+    return {
+        "email": state.get("last_signed_in_as") or "",
+        "wallet": state.get("last_wallet_address") or "",
+    }
 
 
 def offers_access_choice() -> bool:
@@ -225,8 +257,7 @@ def sign_in_steps(code: str, url: str, *, upgrade: bool = False) -> list[str]:
     steps = [
         f"Open {url} in your regular web browser (if you're already signed in "
         "to CoinFello there, the next step is skipped).",
-        "Sign in to your CoinFello account with your email or phone, like any "
-        "CoinFello login. This is not where the code goes.",
+        _sign_in_step(),
         f"When the page asks for your agent's code, type: {code}",
     ]
     if offers_access_choice():
@@ -241,6 +272,20 @@ def sign_in_steps(code: str, url: str, *, upgrade: bool = False) -> list[str]:
         )
     steps.append("Approve. Hermes picks up the sign-in on its own; nothing to paste back.")
     return steps
+
+
+def _sign_in_step() -> str:
+    hint = account_hint()
+    who = (
+        f"the CoinFello account you use in Hermes ({mask_email(hint['email'])})"
+        if hint["email"] and "@" in hint["email"]
+        else "your CoinFello account"
+    )
+    return (
+        f"Sign in to {who} with your email or phone. If the browser asks you to "
+        "sign in or sign a message with a wallet extension such as MetaMask, "
+        "cancel it: that is a different account. This is not where the code goes."
+    )
 
 
 def _sign_in_message(code: str, url: str, *, upgrade: bool) -> str:
@@ -302,7 +347,13 @@ def start_browser_sign_in() -> dict:
             "this CoinFello server does not offer browser sign-in yet; "
             "sign in with an email code instead (coinfello_connect with email)"
         )
-    result = _client().call_tool("start_browser_sign_in", {})
+    hint = account_hint()
+    args: dict[str, Any] = {}
+    if hint["wallet"] and accepts_param("start_browser_sign_in", "expected_wallet"):
+        args["expected_wallet"] = hint["wallet"]
+    if hint["email"] and "@" in hint["email"] and accepts_param("start_browser_sign_in", "expected_email"):
+        args["expected_email"] = hint["email"]
+    result = _client().call_tool("start_browser_sign_in", args)
     if not isinstance(result, dict) or not result.get("approval_url"):
         raise RuntimeError(_text(result))
     upgrade = signed_in()
@@ -513,6 +564,8 @@ def status(*, live: bool = True) -> dict:
         "connected": False,
     }
     if not signed_in(state):
+        hint = account_hint()
+        summary["account_hint"] = mask_email(hint["email"]) if hint["email"] else ""
         summary["pending_approval_id"] = state.get("pending_approval_id") or ""
         summary["pending_user_code"] = state.get("pending_user_code") or ""
         summary["pending_approval_url"] = state.get("pending_approval_url") or ""

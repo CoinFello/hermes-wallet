@@ -109,16 +109,40 @@ def save_state(patch: dict) -> dict:
 
 
 def clear_state() -> dict:
-    """Forget the session entirely (token, wallet, pending approval)."""
+    """Forget the session entirely (token, wallet, access, anything pending).
+
+    Keeps a NON-SECRET hint of the account that was signed in (email and
+    wallet address), so the next browser sign-in can ask CoinFello for that
+    same account instead of whatever wallet the browser offers first.
+    """
+    state = load_state()
+    hint_wallet = state.get("wallet_address") or state.get("last_wallet_address") or ""
+    hint_email = state.get("signed_in_as") or state.get("email") or state.get("last_signed_in_as") or ""
     return save_state(
         {
             "session_token": "",
             "wallet_address": "",
             "expires_at": "",
             "email": "",
+            "signed_in_as": "",
+            "access": None,
+            "daily_limit_usd": None,
             "pending_approval_id": "",
+            "pending_user_code": "",
+            "pending_approval_url": "",
+            "pending_upgrade": False,
+            "pending_limit_change_id": "",
+            "pending_limit_change_url": "",
+            "pending_limit_requested": None,
+            "last_wallet_address": hint_wallet,
+            "last_signed_in_as": hint_email,
         }
     )
+
+
+def forget_account_hint() -> dict:
+    """'Use a different account': the next sign-in asks for no account."""
+    return save_state({"last_wallet_address": "", "last_signed_in_as": ""})
 
 
 def signed_in(state: dict | None = None) -> bool:

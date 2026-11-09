@@ -149,3 +149,14 @@ def limit_poll():
 @router.post("/limit/cancel")
 def limit_cancel():
     return _safe(core.cancel_limit_change)
+
+
+@router.post("/forget-account")
+def forget_account():
+    """'Use a different account' on the sign-in screen."""
+
+    def run():
+        core.forget_account_hint()
+        return {"ok": True}
+
+    return _safe(run)
