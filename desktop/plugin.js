@@ -513,8 +513,10 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
   const tokenSentRef = useRef(false)
   const [mount, setMount] = useState(0)
   const [height, setHeight] = useState(560)
-  const [notice, setNotice] = useState('')
-  const [resultUrl, setResultUrl] = useState(null)
+  // Fallback "View" for embeds that cannot open links through us (they say
+  // so by NOT advertising 'open-url'); an embed that can shows its own.
+  const [fallbackViewUrl, setFallbackViewUrl] = useState(null)
+  const embedOpensLinksRef = useRef(false)
   const [error, setError] = useState('')
 
   const dark = document.documentElement.classList.contains('dark')
@@ -522,6 +524,8 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
 
   useEffect(() => {
     tokenSentRef.current = false
+    embedOpensLinksRef.current = false
+    setFallbackViewUrl(null)
     // Per-mount secret, handed to the embed with its first token. Later token
     // requests (the embed asks again when a token expires) must echo it: a
     // document the frame navigated to never saw it, so it gets nothing.
@@ -545,6 +549,7 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
       if (!frame || event.source !== frame.contentWindow) return
       const message = event.data || {}
       if (message.type === 'coinfello:embed-ready') {
+        embedOpensLinksRef.current = Array.isArray(message.features) && message.features.includes('open-url')
         if (!tokenSentRef.current) {
           tokenSentRef.current = true
           await sendToken(frame)
@@ -573,9 +578,8 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
         }
       } else if (message.type === 'coinfello:swap-result') {
         queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
-        if (message.status === 'success') {
-          setNotice('Swap submitted.')
-          setResultUrl(txUrl(message.transactionHash))
+        if (message.status === 'success' && !embedOpensLinksRef.current) {
+          setFallbackViewUrl(txUrl(message.transactionHash))
         }
       }
     }
@@ -602,17 +606,6 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
             ],
           })
         : null,
-      notice
-        ? jsxs('div', {
-            className: cn(row, 'text-xs'),
-            children: [
-              jsx('span', { className: up, children: notice }),
-              resultUrl
-                ? jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(resultUrl), children: 'View transaction' })
-                : null,
-            ],
-          })
-        : null,
       jsx(SandboxedFrame, {
         key: mount,
         ref: frameRef,
@@ -622,6 +615,20 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
         className: 'w-full rounded-md',
         style: { height },
       }),
+      fallbackViewUrl
+        ? jsxs('div', {
+            className: cn(row, 'text-[0.6875rem]', muted),
+            children: [
+              jsx('span', { children: "The swap's View button can't open from inside Hermes. Use this one:" }),
+              jsx(Button, {
+                size: 'sm',
+                variant: 'outline',
+                onClick: () => ctx.os.openExternal(fallbackViewUrl),
+                children: jsxs(Fragment, { children: ['View transaction', jsx(Codicon, { name: 'link-external', size: 12 })] }),
+              }),
+            ],
+          })
+        : null,
     ],
   })
 }
