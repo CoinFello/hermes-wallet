@@ -130,6 +130,11 @@ const STYLES = `
 .cf-net + .cf-net { margin-top: 6px; }
 .cf-net-head { display: flex; justify-content: space-between; padding: 4px 4px 2px; font-size: 11px; color: var(--ui-text-tertiary);
   font-variant-numeric: tabular-nums; }
+.cf-net-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; color: var(--ui-text-primary); }
+.cf-net-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-net-logo { width: 16px; height: 16px; flex: none; border-radius: 4px; object-fit: cover; }
+.cf-net-logo.is-letter { display: grid; place-items: center; background: var(--ui-bg-quaternary); color: var(--ui-text-secondary);
+  font-size: 9px; font-weight: 600; }
 .cf-token { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 9px; }
 .cf-token:hover { background: var(--chrome-action-hover); }
 .cf-token-icon { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; background: var(--ui-bg-quaternary); }
@@ -231,6 +236,37 @@ function TokenLogo({ token }) {
     return jsx('div', { className: 'cf-token-fallback', children: (token.symbol || '?').slice(0, 3) })
   }
   return jsx('img', { src: sources[index], alt: '', className: 'cf-token-icon', onError: () => setIndex(index + 1) })
+}
+
+// Network icons, as coinfello-web's NetworkToken: the chain's native-token icon
+// from MetaMask's CDN, local overrides for chains it lacks, then the app's
+// generic blockchain icon, then the network's first letter.
+const NATIVE_TOKEN_ADDRESS = '0x0000000000000000000000000000000000000000'
+const CHAIN_ICON_OVERRIDES = {
+  130: '/Icons/chains/unichain.svg',
+  4663: '/Icons/chains/robinhood.png',
+  57073: '/Icons/chains/ink.svg',
+}
+
+function originOf(url) {
+  try {
+    return new URL(url).origin
+  } catch {
+    return 'https://app.coinfello.com'
+  }
+}
+
+function ChainLogo({ chainId, name, appOrigin }) {
+  const override = CHAIN_ICON_OVERRIDES[Number(chainId)]
+  const sources = [
+    override ? appOrigin + override : `https://static.cx.metamask.io/api/v1/tokenIcons/${chainId}/${NATIVE_TOKEN_ADDRESS}.png`,
+    `${appOrigin}/Icons/Blockchain-icon.svg`,
+  ]
+  const [index, setIndex] = useState(0)
+  if (index >= sources.length) {
+    return jsx('span', { className: 'cf-net-logo is-letter', 'aria-hidden': true, children: (name || '?').slice(0, 1) })
+  }
+  return jsx('img', { src: sources[index], alt: '', className: 'cf-net-logo', loading: 'lazy', onError: () => setIndex(index + 1) })
 }
 
 function ExternalButton({ ctx, url, label, icon }) {
@@ -415,6 +451,7 @@ function Assets({ ctx }) {
   const data = portfolio.data
   if (!data || data.ok === false) return null
   const networks = data.networks || []
+  const appOrigin = originOf(data.portfolio_url)
   return jsxs('section', {
     className: 'cf-section',
     children: [
@@ -440,7 +477,16 @@ function Assets({ ctx }) {
                   children: [
                     jsxs('div', {
                       className: 'cf-net-head',
-                      children: [jsx('span', { children: network.chain_name }), jsx('span', { children: network.subtotal_text })],
+                      children: [
+                        jsxs('span', {
+                          className: 'cf-net-name',
+                          children: [
+                            jsx(ChainLogo, { chainId: network.chain_id, name: network.chain_name, appOrigin }),
+                            jsx('span', { children: network.chain_name }),
+                          ],
+                        }),
+                        jsx('span', { children: network.subtotal_text }),
+                      ],
                     }),
                     ...network.tokens.map((token, index) =>
                       jsxs(
