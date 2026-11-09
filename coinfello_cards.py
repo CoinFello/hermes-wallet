@@ -165,21 +165,13 @@ def bind_host(ctx: Any) -> None:
 
 def session_surface() -> str:
     """``desktop``, ``cli``, ``telegram``, ... for the running turn; "" if unknown."""
-    readers: list[Callable[[], str]] = [_surface_reader] if _surface_reader else []
+    if _surface_reader is None:
+        return ""
     try:
-        from hermes_cli.plugin_session import session_surface as module_reader
-
-        readers.append(module_reader)
+        surface = _surface_reader()
     except Exception:
-        pass
-    for reader in readers:
-        try:
-            surface = reader()
-        except Exception:
-            continue
-        if isinstance(surface, str):
-            return surface
-    return ""
+        return ""
+    return surface if isinstance(surface, str) else ""
 
 
 def _announce(card_id: str) -> bool:
