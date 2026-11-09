@@ -138,6 +138,66 @@ test("the error card's Retry is checked against the retryable list and the card'
   assert.equal(bridge.cardToolDecision('__proto__', 'whoami', {}), 'deny')
 })
 
+const YIELD = 'ui://coinfello/yield-card.html'
+const EARN = 'ui://coinfello/earn-deposit-card.html'
+
+test('the yield and earn deposit cards reach each other, and money still needs the confirm sheet', () => {
+  for (const [uri, other] of [[YIELD, 'show_earn_deposit_card'], [EARN, 'show_yield_card']]) {
+    assert.equal(bridge.cardToolDecision(uri, other, {}), 'relay', uri)
+    assert.equal(bridge.cardToolDecision(uri, 'prepare_earn_deposit', {}), 'relay', uri)
+    assert.equal(bridge.cardToolDecision(uri, 'execute_intent', {}), 'confirm', uri)
+    for (const name of ['prepare_swap', 'prepare_send', 'cancel_automation', 'show_quote_card', 'fello_chat', 'create_embed_token']) {
+      assert.equal(bridge.cardToolDecision(uri, name, {}), 'deny', `${uri} ${name}`)
+    }
+  }
+  // Only these two are joined: no other card gains the deposit tools.
+  assert.equal(bridge.cardToolDecision(PORTFOLIO, 'show_earn_deposit_card', {}), 'deny')
+  assert.equal(bridge.cardToolDecision(QUOTE, 'prepare_earn_deposit', {}), 'deny')
+})
+
+test('Check status is relayed only from cards that can end in an unknown outcome', () => {
+  const status = ['quote', 'send', 'dca', 'earn-deposit', 'yield'].map((name) => `ui://coinfello/${name}-card.html`)
+  for (const [uri, card] of Object.entries(bridge.CARD_TOOLS)) {
+    const expected = status.includes(uri) || card.tool === 'show_status_card' ? 'relay' : 'deny'
+    assert.equal(bridge.cardToolDecision(uri, 'show_status_card', {}), expected, uri)
+  }
+  for (const uri of status) assert.equal(bridge.cardToolDecision(uri, 'execute_intent', {}), 'confirm', uri)
+})
+
+test("a yield row's Deposit gets the earn card's result back raw, to draw in the same frame", async () => {
+  const earnCard = {
+    content: [{ type: 'text', text: 'Earn deposit.' }],
+    structuredContent: { kind: 'earn_deposit', phase: 'form', opportunity: { yieldId: 'base-usdc-aave-v3-lending' } },
+  }
+  const { instance, posted, restCalls } = harness({ uri: YIELD, rest: () => ({ ok: true, result: earnCard }) })
+  instance.handle({ jsonrpc: '2.0', id: 11, method: 'tools/call',
+    params: { name: 'show_earn_deposit_card', arguments: { yield_id: 'base-usdc-aave-v3-lending' } } })
+  await settle()
+  // Through the yield card's own record: no new card, no Earn view.
+  assert.deepEqual(restCalls, [[`/cards/${'c'.repeat(32)}/call`,
+    { tool: 'show_earn_deposit_card', arguments: { yield_id: 'base-usdc-aave-v3-lending' } }]])
+  assert.deepEqual(posted, [{ jsonrpc: '2.0', id: 11, result: earnCard }])
+})
+
+test('execute_intent from the yield card opens the confirmation; only its Confirm result goes back', async () => {
+  const preview = { confirm_id: 'cf-3', tool: 'execute_intent', title: 'Confirm on-chain', description: 'Run this earn deposit…', rows: [], expires_in_seconds: 100 }
+  const executed = { ok: true, tool: 'execute_intent', result: { content: [{ type: 'text', text: '{"success":true}' }] } }
+  const seen = []
+  const { instance, posted, restCalls } = harness({
+    uri: YIELD,
+    rest: () => ({ ok: true, confirm: preview }),
+    confirm: async (shown) => {
+      seen.push(shown)
+      return executed
+    },
+  })
+  instance.handle({ jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'execute_intent', arguments: { intent_id: INTENT } } })
+  await settle()
+  assert.deepEqual(restCalls.map(([path]) => path), [`/cards/${'c'.repeat(32)}/call`])
+  assert.deepEqual(seen, [preview])
+  assert.deepEqual(posted, [{ jsonrpc: '2.0', id: 12, result: executed.result }])
+})
+
 test('execute_intent opens the confirmation; only its Confirm result goes back', async () => {
   const preview = { confirm_id: 'cf-1', tool: 'execute_intent', title: 'Confirm on-chain', description: 'Bridge…', rows: [], expires_in_seconds: 100 }
   const executed = { ok: true, tool: 'execute_intent', result: { content: [{ type: 'text', text: '{"success":true}' }] } }

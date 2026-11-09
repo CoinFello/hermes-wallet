@@ -1922,6 +1922,13 @@ const CARD_CANCELLED_TEXT = 'Cancelled in Hermes. Nothing was sent.'
 
 // The same tables as coinfello_cards.py (a test keeps them in sync): what a
 // card may relay is checked here AND in the backend.
+//
+// The yield and earn deposit cards share one document that draws either, so
+// a row's Deposit (show_earn_deposit_card) and Browse yields (show_yield_card)
+// come back through the bridge like any tools/call and the card redraws in
+// place from the result's structuredContent. The frame, its record and its
+// allowlist stay those of the card that was shown; nothing is remounted, and
+// the model's Earn view routing (coinfello_show_card) is never involved.
 const CARD_ALWAYS_RELAYED = ['whoami']
 const CARD_RETRYABLE_TOOLS = [
   'get_activity', 'get_balances', 'get_deposit_options', 'get_gas_price',
@@ -1937,17 +1944,17 @@ const CARD_NEVER_RELAYED = [
 const CARD_TOOLS = {
   'ui://coinfello/portfolio-card.html': { tool: 'show_portfolio_card', relay: [], confirm: [] },
   'ui://coinfello/status-card.html': { tool: 'show_status_card', relay: [], confirm: [] },
-  'ui://coinfello/quote-card.html': { tool: 'show_quote_card', relay: ['prepare_swap', 'prepare_send'], confirm: ['execute_intent'] },
+  'ui://coinfello/quote-card.html': { tool: 'show_quote_card', relay: ['prepare_swap', 'prepare_send', 'show_status_card'], confirm: ['execute_intent'] },
   'ui://coinfello/automations-card.html': { tool: 'show_automations_card', relay: ['pause_automation'], confirm: ['cancel_automation'] },
   'ui://coinfello/needs-you-card.html': { tool: 'show_needs_you_card', relay: [], confirm: [] },
   'ui://coinfello/error-card.html': { tool: 'show_error_card', relay: [], confirm: [] },
   'ui://coinfello/fund-card.html': { tool: 'show_fund_card', relay: [], confirm: [] },
-  'ui://coinfello/yield-card.html': { tool: 'show_yield_card', relay: [], confirm: [] },
+  'ui://coinfello/yield-card.html': { tool: 'show_yield_card', relay: ['show_earn_deposit_card', 'prepare_earn_deposit', 'show_status_card'], confirm: ['execute_intent'] },
   'ui://coinfello/lp-ranges-card.html': { tool: 'show_lp_ranges_card', relay: [], confirm: [] },
   'ui://coinfello/perp-card.html': { tool: 'show_perp_card', relay: [], confirm: [] },
-  'ui://coinfello/send-card.html': { tool: 'show_send_card', relay: ['prepare_send'], confirm: ['execute_intent'] },
-  'ui://coinfello/dca-card.html': { tool: 'show_dca_card', relay: ['prepare_dca'], confirm: ['execute_intent'] },
-  'ui://coinfello/earn-deposit-card.html': { tool: 'show_earn_deposit_card', relay: ['prepare_earn_deposit'], confirm: ['execute_intent'] },
+  'ui://coinfello/send-card.html': { tool: 'show_send_card', relay: ['prepare_send', 'show_status_card'], confirm: ['execute_intent'] },
+  'ui://coinfello/dca-card.html': { tool: 'show_dca_card', relay: ['prepare_dca', 'show_status_card'], confirm: ['execute_intent'] },
+  'ui://coinfello/earn-deposit-card.html': { tool: 'show_earn_deposit_card', relay: ['prepare_earn_deposit', 'show_yield_card', 'show_status_card'], confirm: ['execute_intent'] },
   'ui://coinfello/spend-limit-card.html': { tool: 'show_spend_limit_card', relay: ['prepare_spend_limit'], confirm: ['execute_intent'] },
 }
 

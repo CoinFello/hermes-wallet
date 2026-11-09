@@ -111,6 +111,28 @@ PREPARED_SEND = {
     },
 }
 
+#: the server's prepare_earn_deposit, for a yield the yield card listed.
+EARN_INTENT = "88888888-8888-8888-8888-888888888888"
+PREPARED_EARN = {
+    "intentId": EARN_INTENT,
+    "expiresInSeconds": 120,
+    "summary": {
+        "kind": "earn_deposit", "yieldId": "base-usdc-aave-v3-lending", "name": "Aave v3 USDC",
+        "protocol": "aave", "chainId": 8453, "chainName": "Base",
+        "token": {"symbol": "USDC", "address": "0xUSDC", "decimals": 6},
+        "amount": "50", "valueUsd": 50.0, "ratePct": 4.8,
+    },
+}
+#: the server's yield card rows: Deposit only where the earn card can take it.
+EARN_FLOW_YIELD_ROWS = [
+    {"id": "base-usdc-aave-v3-lending", "name": "Aave v3 USDC", "protocol": "aave",
+     "network": "Base", "ratePct": 4.8, "tvlUsd": 120_000_000, "outlier": False,
+     "flags": [], "depositable": True},
+    {"id": "base-usdc-weth-aerodrome", "name": "USDC/WETH", "protocol": "aerodrome",
+     "network": "Base", "ratePct": 12.0, "tvlUsd": 9_000_000, "outlier": False,
+     "flags": [], "depositable": False},
+]
+
 EMBED_TOKEN = {
     "embed_token": "cfemb_test",
     "expires_at": "2099-01-01T00:15:00Z",
@@ -176,6 +198,7 @@ CARD_TOOLS = [
      "_meta": _ui_meta("ui://elsewhere/status-card.html")},
     {"name": "show_sign_in_card", "inputSchema": _props("session_token"),
      "_meta": _ui_meta("ui://coinfello/sign-in-card.html")},
+    {"name": "prepare_earn_deposit", "inputSchema": _props("yield_id", "amount", "session_token")},
     {"name": "pause_automation", "inputSchema": _props("trigger_id", "session_token")},
     {"name": "cancel_automation", "inputSchema": _props("trigger_id", "session_token")},
     {"name": "get_positions", "inputSchema": _props("session_token")},
@@ -195,8 +218,10 @@ def _card_result(text, data):
     return {"content": [{"type": "text", "text": f"{MODEL_NOTE}\n{text}"}], "structuredContent": data}
 
 
-def _card_tool(name, arguments):
-    """The mock's show_*_card answers, or None for any other tool."""
+def _card_tool(name, arguments, state=None):
+    """The mock's show_*_card answers, or None for any other tool.
+    ``state["earn_flow"]``: the yield and earn cards of the server."""
+    earn_flow = bool(state and state.get("earn_flow"))
     if name == "show_portfolio_card":
         return _card_result(
             "Portfolio: $2,500.00\nUSDC on Base: $1,000.00\nETH on Ethereum: $1,500.00",
@@ -211,8 +236,24 @@ def _card_tool(name, arguments):
             "kind": "network", "retryTool": retry if retry in RETRYABLE else None, "retryArgs": {}})
     if name == "show_automations_card":
         return _card_result("1 open automation.\nWeekly ETH", {"rows": AUTOMATION_ROWS, "note": None})
+    if name == "show_earn_deposit_card" and earn_flow:
+        yield_id = arguments.get("yield_id")
+        row = next((r for r in EARN_FLOW_YIELD_ROWS if r["id"] == yield_id), None)
+        opportunity = None if row is None else {
+            "yieldId": row["id"], "name": row["name"], "protocol": row["protocol"],
+            "chainName": row["network"], "token": {"symbol": "USDC", "decimals": 6},
+            "ratePct": row["ratePct"], "balance": "120.5"}
+        return _card_result("Earn deposit.", {
+            "kind": "earn_deposit", "phase": "form", "intentId": None,
+            "prepareTool": "prepare_earn_deposit",
+            "prepareBase": {"yield_id": yield_id} if opportunity else {},
+            "opportunity": opportunity, "browseToken": None if opportunity else "USDC"})
     if name == "show_earn_deposit_card":
         return _card_result("Deposit into a yield: enter its id.", {"yieldId": arguments.get("yield_id")})
+    if name == "show_yield_card" and earn_flow:
+        return _card_result("Yields for USDC.", {"token": arguments.get("token"), "rows": EARN_FLOW_YIELD_ROWS})
+    if name == "prepare_earn_deposit":
+        return _tool_result(PREPARED_EARN)
     if name in ("show_yield_card", "show_status_card", "show_sign_in_card"):
         return _card_result(f"{name} text", {"rows": []})
     if name in ("pause_automation", "cancel_automation"):
@@ -414,7 +455,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
 
     def _handle_tool(self, message_id, name, arguments):
         state = self.state
-        card = _card_tool(name, arguments) if state["cards"] else None
+        card = _card_tool(name, arguments, state) if state["cards"] else None
         if card is not None:
             self._json(200, _rpc_response(message_id, card))
             return
@@ -651,6 +692,8 @@ def mock_mcp(monkeypatch):
         "transfer_status": False,
         # MCP App cards: show_*_card tools with _meta.ui and resources/read.
         "cards": False,
+        # yield rows with Deposit, an earn card by yield_id.
+        "earn_flow": False,
         "resource_reads": [],
         "resource_mime": CARD_MIME,
         "resource_uri_override": "",

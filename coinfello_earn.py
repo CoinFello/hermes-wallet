@@ -55,6 +55,13 @@ EARN_FALLBACK_NOTE = (
     "yield card is in the pane instead. Deposits cannot be made from Hermes "
     "on this server: point the human to {url} to deposit."
 )
+EARN_DEPOSIT_ROWS_NOTE = (
+    "This CoinFello server has no Earn view for Hermes yet, so the yield card "
+    "is in the pane instead. Its Deposit button on a row opens the deposit "
+    "for that yield on the same card, which still asks the human to confirm "
+    "in the pane. A row without one (a liquidity pool, or a listing CoinFello "
+    "cannot deposit into) deposits at {url}."
+)
 
 _lock = threading.RLock()
 

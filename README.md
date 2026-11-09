@@ -179,10 +179,26 @@ What a card may call, checked in the pane and again in Python:
 | Card | Relayed | Needs the human's Confirm in the pane |
 |---|---|---|
 | every card | its own `show_*_card` (refresh), `whoami` | |
-| quote | `prepare_swap`, `prepare_send` | `execute_intent` |
-| send / dca / earn_deposit / spend_limit | its `prepare_*` | `execute_intent` |
+| quote | `prepare_swap`, `prepare_send`, `show_status_card` | `execute_intent` |
+| send / dca | its `prepare_*`, `show_status_card` | `execute_intent` |
+| spend_limit | `prepare_spend_limit` | `execute_intent` |
+| yield | `show_earn_deposit_card`, `prepare_earn_deposit`, `show_status_card` | `execute_intent` |
+| earn_deposit | `prepare_earn_deposit`, `show_yield_card`, `show_status_card` | `execute_intent` |
 | automations | `pause_automation` | `cancel_automation` |
 | error | its Retry tool, if on the server's retryable list (reads and quotes) | |
+
+The yield and earn deposit cards are one flow in one frame: coinfello-web
+builds both documents with both renderers, so a yield row's **Deposit**
+calls `show_earn_deposit_card({yield_id})` and draws the result's
+`structuredContent` in place, and the deposit card's **Browse yields** does
+the same with `show_yield_card`. The pane relays these like any
+`tools/call` and hands the raw result back; it does not mount a second card
+or open the Earn view. The frame keeps the record and allowlist of the card
+that was shown, which is why each one lists the other's show tool and the
+deposit's prepare and confirm.
+
+`show_status_card` (a read) is relayed from the cards that can end in
+"outcome unknown" after `execute_intent`, for their **Check status** button.
 
 `execute_intent` runs only for an intent this card produced and Hermes
 prepared (the server's summary, kept with the card record, is what the
@@ -235,14 +251,14 @@ window but the host's own frame are ignored; heights are clamped to
   arguments) instead of the typed-yield-id card, and calls no CoinFello tool.
   Other surfaces keep the card's text. This reuses `coinfello_show_card`
   rather than adding a tool: it is where the agent already goes to deposit,
-  and it keeps the desktop-or-text rule in one place. The `yield` card is
-  unchanged.
+  and it keeps the desktop-or-text rule in one place. A yield card's Deposit
+  inside the pane is not this path: it stays in the card (see the table above).
 - **Read-only sessions** may open Earn: the server decides whether to mint a
   token for browsing, and a refusal is shown in plain words.
 - **Older servers** (no `scope` on `create_embed_token`, or one without
   `earn`): no Earn button, a one-line note, and `earn_deposit` on desktop
-  shows the read-only `yield` card when it has a token to show (otherwise
-  the deposit card, as before).
+  shows the `yield` card when it has a token to show (otherwise the deposit
+  card, as before). The agent's note says whether its rows offer Deposit.
 
 ## Security notes
 

@@ -446,6 +446,141 @@ def test_cancel_only_an_automation_the_card_listed(server):
     assert _calls(server)[-1] == ("cancel_automation", {"trigger_id": "trg-1"})
 
 
+# -- the earn flow: the yield card and the earn deposit card in one frame -----------
+
+EARN_YIELD = "base-usdc-aave-v3-lending"
+EARN_INTENT = "88888888-8888-8888-8888-888888888888"
+
+
+@pytest.fixture
+def earn_flow(server, monkeypatch, tmp_path):
+    """the server's cards, on a server that also has the Earn embed
+    (so coinfello_show_card(card="earn_deposit") would open the Earn view)."""
+    import coinfello_earn as earn
+
+    server.mock_state.update(earn_flow=True, embed_scopes=("swap", "earn"))
+    core._capabilities.update(url=None, tools=frozenset(), at=0.0)
+    monkeypatch.setattr(earn, "store_path", lambda: tmp_path / "coinfello" / "earn-request.json")
+    monkeypatch.setattr(earn, "_announce", lambda request_id: True)
+    assert core.embeds_earn() is True
+    return server
+
+
+@pytest.mark.parametrize("card, tool, decision", [
+    ("yield", "show_earn_deposit_card", "relay"),
+    ("yield", "prepare_earn_deposit", "relay"),
+    ("yield", "execute_intent", "confirm"),
+    ("yield", "show_yield_card", "relay"),
+    ("earn_deposit", "show_yield_card", "relay"),
+    ("earn_deposit", "prepare_earn_deposit", "relay"),
+    ("earn_deposit", "execute_intent", "confirm"),
+    ("earn_deposit", "show_earn_deposit_card", "relay"),
+    ("yield", "prepare_swap", "deny"),
+    ("yield", "prepare_send", "deny"),
+    ("yield", "cancel_automation", "deny"),
+    ("yield", "fello_chat", "deny"),
+    ("earn_deposit", "show_quote_card", "deny"),
+    ("earn_deposit", "create_embed_token", "deny"),
+    ("portfolio", "show_earn_deposit_card", "deny"),
+    ("quote", "prepare_earn_deposit", "deny"),
+])
+def test_the_yield_and_earn_cards_reach_each_other_and_nothing_else(card, tool, decision):
+    assert cards.relay_decision({"uri": cards.CARDS[card].uri}, tool) == decision
+
+
+def test_a_yield_rows_deposit_stays_in_the_card_frame(earn_flow):
+    import coinfello_earn as earn
+
+    card_id = _show("yield", {"token": "USDC"})["card_id"]
+    listed = cards.get_card(card_id)["result"]
+    out = cards.card_call(card_id, "show_earn_deposit_card", {"yield_id": EARN_YIELD})
+    drawn = out["result"]["structuredContent"]
+    assert drawn["kind"] == "earn_deposit" and drawn["opportunity"]["yieldId"] == EARN_YIELD
+    assert _calls(earn_flow)[-1] == ("show_earn_deposit_card", {"yield_id": EARN_YIELD})
+    # Drawn in place: no Earn view request, no second card, and the yield
+    # card's record (what a remount shows) is still the list.
+    assert earn.pending_request() is None
+    assert [card["id"] for card in cards.list_cards()] == [card_id]
+    assert cards.get_card(card_id)["result"] == listed
+    assert cards.card_document(card_id)["relay"] == [
+        "prepare_earn_deposit", "show_earn_deposit_card", "show_status_card", "show_yield_card", "whoami"]
+    assert cards.card_document(card_id)["confirm"] == ["execute_intent"]
+
+
+def test_a_deposit_drawn_on_the_yield_card_runs_only_through_the_confirm_sheet(earn_flow):
+    card_id = _show("yield", {"token": "USDC"})["card_id"]
+    cards.card_call(card_id, "show_earn_deposit_card", {"yield_id": EARN_YIELD})
+    # Not yet prepared on this card: nothing to confirm.
+    with pytest.raises(cards.CardRefused, match="did not prepare that trade"):
+        cards.card_call(card_id, "execute_intent", {"intent_id": EARN_INTENT})
+    cards.card_call(card_id, "prepare_earn_deposit", {"yield_id": EARN_YIELD, "amount": ".5"})
+    assert _calls(earn_flow)[-1] == ("prepare_earn_deposit", {"yield_id": EARN_YIELD, "amount": "0.5"})
+    assert cards.get_card(card_id)["intents"][EARN_INTENT]["summary"]["kind"] == "earn_deposit"
+
+    preview = cards.card_call(card_id, "execute_intent", {"intent_id": EARN_INTENT})["confirm"]
+    assert "execute_intent" not in [name for name, _ in _calls(earn_flow)]
+    assert preview["description"] == "Run this earn deposit from your automations wallet, exactly as prepared."
+    assert ["Name", "Aave v3 USDC"] in preview["rows"]
+    out = cards.card_execute(card_id, preview["confirm_id"])
+    assert out["tool"] == "execute_intent"
+    assert _calls(earn_flow)[-1] == ("execute_intent", {"intent_id": EARN_INTENT})
+    with pytest.raises(cards.CardRefused):
+        cards.card_call(card_id, "execute_intent", {"intent_id": EARN_INTENT})
+
+
+def test_an_intent_from_another_card_cannot_be_confirmed_on_the_yield_card(earn_flow):
+    earn_card = _show("earn_deposit", {"yield_id": EARN_YIELD}, surface="desktop")
+    assert earn_card["view"] == "earn"  # the model's earn_deposit still opens the Earn view
+    quote = _show("quote", {"intent_id": INTENT})["card_id"]
+    cards.card_call(quote, "prepare_swap", {"from_chain_id": 1, "from_token": "ETH",
+                                            "to_chain_id": 137, "to_token": "POL", "amount": "0.004186"})
+    yields = _show("yield", {"token": "USDC"})["card_id"]
+    with pytest.raises(cards.CardRefused, match="did not prepare that trade"):
+        cards.card_call(yields, "execute_intent", {"intent_id": INTENT})
+    assert "execute_intent" not in [name for name, _ in _calls(earn_flow)]
+
+
+def test_the_earn_cards_browse_yields_draws_the_list_in_place(earn_flow):
+    earn_flow.mock_state["embed_scopes"] = None  # no Earn view: the earn card itself is shown
+    core._capabilities.update(url=None, tools=frozenset(), at=0.0)
+    card_id = _show("earn_deposit", {"yield_id": EARN_YIELD})["card_id"]
+    assert cards.get_card(card_id)["uri"] == "ui://coinfello/earn-deposit-card.html"
+    out = cards.card_call(card_id, "show_yield_card", {"token": "USDC"})
+    assert out["result"]["structuredContent"]["rows"][0]["depositable"] is True
+    assert _calls(earn_flow)[-1] == ("show_yield_card", {"token": "USDC"})
+    assert [card["id"] for card in cards.list_cards()] == [card_id]
+    # A Deposit on that list is the earn card's own tool: it refreshes the record.
+    cards.card_call(card_id, "show_earn_deposit_card", {"yield_id": EARN_YIELD})
+    assert cards.get_card(card_id)["args"] == {"yield_id": EARN_YIELD}
+
+
+# -- Check status after an unknown outcome -------------------------------------------
+
+#: Cards whose execute_intent can end in "outcome unknown" and offer Check status.
+STATUS_CARDS = ["quote", "send", "dca", "earn_deposit", "yield"]
+
+
+@pytest.mark.parametrize("card", list(cards.CARDS))
+def test_check_status_is_relayed_only_from_cards_with_an_unknown_outcome(card):
+    expected = "relay" if card in STATUS_CARDS or card == "status" else "deny"
+    assert cards.relay_decision({"uri": cards.CARDS[card].uri}, "show_status_card") == expected
+
+
+@pytest.mark.parametrize("card", STATUS_CARDS)
+def test_check_status_does_not_loosen_the_confirm(card):
+    record = {"uri": cards.CARDS[card].uri}
+    assert cards.relay_decision(record, "execute_intent") == "confirm"
+    assert "show_status_card" not in cards.CARDS[card].confirm
+
+
+def test_a_quote_cards_check_status_reaches_the_server(server):
+    card_id = _show("quote", {"intent_id": INTENT})["card_id"]
+    cards.card_call(card_id, "show_status_card", {})
+    assert _calls(server)[-1] == ("show_status_card", {})
+    # A read for the card's button, not a refresh: the record stays the quote.
+    assert cards.get_card(card_id)["result"]["structuredContent"]["kind"] == "bridge"
+
+
 # -- records: disk + TTL -----------------------------------------------------------
 
 def test_records_survive_a_restart_and_expire_after_a_day(server, tmp_path):
@@ -639,7 +774,7 @@ def test_pane_lists_mounts_relays_and_confirms_over_http(api, server):
 
     document = api.get(f"{BASE}/cards/{card_id}", params={"theme": "dark"}).json()
     assert document["ok"] is True and document["confirm"] == ["execute_intent"]
-    assert document["relay"] == ["prepare_send", "prepare_swap", "show_quote_card", "whoami"]
+    assert document["relay"] == ["prepare_send", "prepare_swap", "show_quote_card", "show_status_card", "whoami"]
 
     refused = api.post(f"{BASE}/cards/{card_id}/call", json={"tool": "fello_chat", "arguments": {"message": "x"}}).json()
     assert refused["ok"] is False and "not available" in refused["error"]

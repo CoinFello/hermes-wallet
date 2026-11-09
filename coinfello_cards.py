@@ -64,28 +64,40 @@ class Card(NamedTuple):
 
 
 _MONEY = frozenset({"execute_intent"})
+#: A money card whose execute_intent could not say whether it went out
+#: offers "Check status", a read of the status card.
+_STATUS = "show_status_card"
 
 #: The cards the model may show. Keys are ``coinfello_show_card``'s ``card``.
 #: ``show_sign_in_card`` is left out on purpose: the pane has its own sign-in.
+#:
+#: The yield card and the earn deposit card are one flow in one frame
+#: (coinfello-web's ``earnFlowDocument``): both documents carry both
+#: renderers, so a row's Deposit calls ``show_earn_deposit_card`` and draws
+#: its structuredContent in place, and the deposit card's Browse yields does
+#: the same with ``show_yield_card``. The frame stays the card it was shown
+#: as, so each table lets it call the other's show tool and everything the
+#: drawn deposit card does (prepare, then execute_intent behind the confirm).
 CARDS: dict[str, Card] = {
     "portfolio": Card("show_portfolio_card", "ui://coinfello/portfolio-card.html", "Portfolio"),
     "status": Card("show_status_card", "ui://coinfello/status-card.html", "Status"),
     "quote": Card("show_quote_card", "ui://coinfello/quote-card.html", "Quote",
-                  frozenset({"prepare_swap", "prepare_send"}), _MONEY),
+                  frozenset({"prepare_swap", "prepare_send", _STATUS}), _MONEY),
     "automations": Card("show_automations_card", "ui://coinfello/automations-card.html", "Automations",
                         frozenset({"pause_automation"}), frozenset({"cancel_automation"})),
     "needs_you": Card("show_needs_you_card", "ui://coinfello/needs-you-card.html", "Needs you"),
     "error": Card("show_error_card", "ui://coinfello/error-card.html", "Something went wrong"),
     "fund": Card("show_fund_card", "ui://coinfello/fund-card.html", "Fund your wallet"),
-    "yield": Card("show_yield_card", "ui://coinfello/yield-card.html", "Yields"),
+    "yield": Card("show_yield_card", "ui://coinfello/yield-card.html", "Yields",
+                  frozenset({"show_earn_deposit_card", "prepare_earn_deposit", _STATUS}), _MONEY),
     "lp_ranges": Card("show_lp_ranges_card", "ui://coinfello/lp-ranges-card.html", "LP ranges"),
     "perp": Card("show_perp_card", "ui://coinfello/perp-card.html", "Perps"),
     "send": Card("show_send_card", "ui://coinfello/send-card.html", "Send",
-                 frozenset({"prepare_send"}), _MONEY),
+                 frozenset({"prepare_send", _STATUS}), _MONEY),
     "dca": Card("show_dca_card", "ui://coinfello/dca-card.html", "Recurring buy",
-                frozenset({"prepare_dca"}), _MONEY),
+                frozenset({"prepare_dca", _STATUS}), _MONEY),
     "earn_deposit": Card("show_earn_deposit_card", "ui://coinfello/earn-deposit-card.html", "Earn",
-                         frozenset({"prepare_earn_deposit"}), _MONEY),
+                         frozenset({"prepare_earn_deposit", "show_yield_card", _STATUS}), _MONEY),
     "spend_limit": Card("show_spend_limit_card", "ui://coinfello/spend-limit-card.html", "Spend limit",
                         frozenset({"prepare_spend_limit"}), _MONEY),
 }
@@ -423,6 +435,16 @@ def card_names() -> list[str]:
     return list(CARDS)
 
 
+def _has_deposit_rows(shown: dict) -> bool:
+    """Whether the yield card just shown offers a Deposit on any row (a
+    server whose yield card opens the earn deposit card in place)."""
+    try:
+        rows = _structured(get_card(shown.get("card_id")).get("result")).get("rows")
+    except CardRefused:
+        return False
+    return any(isinstance(row, dict) and row.get("depositable") is True for row in rows or [])
+
+
 def _earn_on_desktop(arguments: Any, *, session_id: str) -> dict | None:
     """``earn_deposit`` on Hermes desktop. With the server's Earn embed: the
     pane's Earn view (CoinFello's real Earn UI; no typed yield id). Without
@@ -441,7 +463,8 @@ def _earn_on_desktop(arguments: Any, *, session_id: str) -> dict | None:
             or _missing_required(kind.tool, tool_arguments(kind.tool, yield_args))):
         return None
     shown = show_card("yield", yield_args, session_id=session_id, surface="desktop")
-    shown["note"] = PANE_NOTE + " " + earn.EARN_FALLBACK_NOTE.format(url=core.app_url("/earn"))
+    fallback = earn.EARN_DEPOSIT_ROWS_NOTE if _has_deposit_rows(shown) else earn.EARN_FALLBACK_NOTE
+    shown["note"] = PANE_NOTE + " " + fallback.format(url=core.app_url("/earn"))
     shown["earn_view"] = False
     return shown
 

@@ -243,6 +243,15 @@ def test_an_older_server_shows_the_yield_card_instead(server):
     assert earn.pending_request() is None
 
 
+def test_an_older_server_whose_yield_card_has_deposit_says_so(server):
+    _older_server(server)
+    server.mock_state["earn_flow"] = True
+    out = _show({"token": "USDC", "chain_id": 8453})
+    assert out["card"] == "yield"
+    assert "Deposit button on a row opens the deposit" in out["note"]
+    assert "cannot be made from Hermes" not in out["note"]
+
+
 def test_an_older_server_without_a_token_keeps_the_deposit_card(server):
     # The yield card needs a token; a bare yield id is what the deposit card takes.
     _older_server(server)
