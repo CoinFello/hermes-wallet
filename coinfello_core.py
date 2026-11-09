@@ -11,6 +11,7 @@ them.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -748,6 +749,35 @@ def portfolio() -> dict:
     return model
 
 
+# -- amounts -------------------------------------------------------------------
+# The server takes a plain decimal with a leading digit ("0.001", not ".001").
+# Every amount the pane or the agent sends goes through normalize_amount
+# first; desktop/plugin.js normalizeAmount is the pane's copy of the same
+# rules (tests/amount_cases.json holds the two to one table).
+
+_AMOUNT_RE = re.compile(r"([0-9]*)(?:\.([0-9]*))?")
+AMOUNT_HINT = "Enter an amount like 0.001"
+AMOUNT_ZERO = "Enter an amount greater than 0"
+
+
+def normalize_amount(value: Any) -> str:
+    """``" .001 "`` -> ``"0.001"``, ``"1."`` -> ``"1"``, ``"007.50"`` -> ``"7.5"``.
+
+    String operations only, so no digit is lost to float rounding. Raises
+    ValueError with a plain message for anything else: a sign, an exponent,
+    a second dot, letters, or zero.
+    """
+    text = str(value if value is not None else "").strip()
+    match = _AMOUNT_RE.fullmatch(text)
+    if not match or not (match.group(1) or match.group(2)):
+        raise ValueError(AMOUNT_HINT)
+    whole = match.group(1).lstrip("0") or "0"
+    fraction = (match.group(2) or "").rstrip("0")
+    if whole == "0" and not fraction:
+        raise ValueError(AMOUNT_ZERO)
+    return f"{whole}.{fraction}" if fraction else whole
+
+
 # -- user-confirmed actions ---------------------------------------------------
 # The pane calls these directly. Agent tools reach them only through
 # coinfello_trades, behind Hermes' human-approval gate.
@@ -764,10 +794,10 @@ def prepare_send(chain_id: Any, token: str, amount: str, recipient: str) -> dict
         chain = int(str(chain_id))
     except ValueError as exc:
         raise ValueError("chain_id must be a number") from exc
-    amount = str(amount or "").strip()
+    amount = normalize_amount(amount)
     recipient = str(recipient or "").strip()
-    if not amount or not recipient:
-        raise ValueError("amount and recipient are required")
+    if not recipient:
+        raise ValueError("recipient is required")
     result = trading_call(
         "prepare_send",
         {"chain_id": chain, "token": str(token), "amount": amount, "recipient": recipient},

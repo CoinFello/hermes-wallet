@@ -189,6 +189,7 @@ their full text plus `structuredContent`, on every surface.
 ```bash
 uv run --no-project --with pytest --with fastapi --with httpx --with 'segno>=1.6,<2' pytest tests/
 node --test tests/card_bridge.test.mjs   # the pane's card bridge (pytest runs it too when node is installed)
+node --test tests/amount.test.mjs        # the pane's amount normalizer (likewise)
 ```
 
 The test suite runs a local mock of the MCP streamable-HTTP transport — no

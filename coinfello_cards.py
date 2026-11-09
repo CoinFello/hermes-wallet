@@ -218,6 +218,19 @@ def tool_arguments(tool: str, arguments: Any) -> dict:
     return {key: value for key, value in strip_secrets(arguments).items() if key in declared}
 
 
+def _plain_amount(args: dict) -> dict:
+    """A string ``amount`` in the server's own form (".001" -> "0.001"). One
+    that does not normalize is sent as it is: the server's refusal comes back
+    to the card in readable words."""
+    amount = args.get("amount")
+    if not isinstance(amount, str):
+        return args
+    try:
+        return {**args, "amount": core.normalize_amount(amount)}
+    except ValueError:
+        return args
+
+
 def _missing_required(tool: str, args: dict) -> list[str]:
     """Required arguments ``args`` lacks. A credential the schema requires is
     not counted: the stored session is sent as a header, never an argument."""
@@ -617,7 +630,7 @@ def card_call(card_id: str, tool: str, arguments: Any = None) -> dict:
     if decision == "confirm":
         return {"ok": True, "confirm": _confirmation(record, tool, arguments)}
 
-    args = tool_arguments(tool, arguments)
+    args = _plain_amount(tool_arguments(tool, arguments))
     if tool.startswith("prepare_"):
         result = core.trading_call_result(tool, args)
     else:

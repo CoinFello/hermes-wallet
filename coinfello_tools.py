@@ -148,12 +148,12 @@ def _quote(args: dict) -> Any:
         "from_chain_id": int(args.get("from_chain_id") or 0),
         "from_token": str(args.get("from_token") or "").strip(),
         "to_token": str(args.get("to_token") or "").strip(),
-        "amount": str(args.get("amount") or "").strip(),
     }
     if not payload["from_chain_id"]:
         raise ValueError("from_chain_id is required")
-    if not payload["from_token"] or not payload["to_token"] or not payload["amount"]:
-        raise ValueError("from_token, to_token and amount are required")
+    if not payload["from_token"] or not payload["to_token"]:
+        raise ValueError("from_token and to_token are required")
+    payload["amount"] = core.normalize_amount(args.get("amount"))
     if args.get("to_chain_id"):
         payload["to_chain_id"] = int(args["to_chain_id"])
     if args.get("slippage") is not None:

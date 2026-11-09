@@ -159,6 +159,19 @@ def test_relayed_arguments_lose_credentials(server):
     assert server.mock_state["auth_headers"][-1] == "Bearer tok-live"
 
 
+def test_relayed_amounts_take_the_servers_form(server):
+    card_id = _show("quote", {"intent_id": INTENT})["card_id"]
+    cards.card_call(card_id, "prepare_swap", {
+        "from_chain_id": 1, "from_token": "ETH", "to_token": "POL", "amount": ".1"})
+    assert _calls(server)[-1][1]["amount"] == "0.1"
+    # Not an amount: sent as it is, and the card gets the server's refusal in words.
+    refused = cards.card_call(card_id, "prepare_swap", {
+        "from_chain_id": 1, "from_token": "ETH", "to_token": "POL", "amount": "abc"})
+    assert _calls(server)[-1][1]["amount"] == "abc"
+    assert refused["result"]["isError"] is True
+    assert refused["result"]["content"] == [{"type": "text", "text": 'amount: A decimal number, e.g. "1.5"'}]
+
+
 # -- the card resource: URI, type, CSP ------------------------------------------
 
 def _client(server):

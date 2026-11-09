@@ -9,6 +9,7 @@ session invalidation for the 404-retry path.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -238,6 +239,22 @@ def _rpc_response(message_id, result):
     return {"jsonrpc": "2.0", "id": message_id, "result": result}
 
 
+#: Production's schema for a trade amount: a leading digit, no sign or exponent.
+SERVER_AMOUNT_RE = re.compile(r"^\d+(\.\d+)?$")
+
+
+def amount_refusal(tool):
+    """The text production sends when its schema refuses ``amount``, verbatim
+    (seen in the Hermes pane, 2026-11-09)."""
+    issues = [{
+        "origin": "string", "code": "invalid_format", "format": "regex",
+        "pattern": "/^\\d+(\\.\\d+)?$/", "path": ["amount"],
+        "message": 'A decimal number, e.g. "1.5"',
+    }]
+    return (f"MCP error -32602: Input validation error: Invalid arguments for tool {tool}: "
+            + json.dumps(issues, indent=2))
+
+
 class MockMCPHandler(BaseHTTPRequestHandler):
     server_version = "MockCoinFelloMCP/0.1"
 
@@ -407,6 +424,17 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 "again with start_browser_sign_in and choose a daily limit on the "
                 "approval page. Email-code sign-in always gives a read-only session.",
                 error=True)))
+            return
+        if (name in ("prepare_send", "prepare_swap", "get_quote") and state["actions"]
+                and not SERVER_AMOUNT_RE.match(str(arguments.get("amount", "")))):
+            self._json(200, _rpc_response(message_id, _tool_result(amount_refusal(name), error=True)))
+            return
+        if name == "strict_rpc":
+            # An older SDK answers a schema refusal as a JSON-RPC error instead.
+            self._json(200, {"jsonrpc": "2.0", "id": message_id, "error": {
+                "code": -32602,
+                "message": amount_refusal(name).removeprefix("MCP error -32602: "),
+            }})
             return
         if name == "prepare_send" and state["actions"]:
             if not str(arguments.get("recipient", "")).startswith("0x"):

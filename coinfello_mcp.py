@@ -10,6 +10,8 @@ tolerating both ``application/json`` and ``text/event-stream`` responses
 from __future__ import annotations
 
 import json
+import logging
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -23,10 +25,26 @@ CLIENT_INFO = {"name": "hermes-coinfello-plugin", "version": "0.1.0"}
 CARD_URI_PREFIX = "ui://coinfello/"
 #: MCP Apps (SEP-1865) HTML resource type.
 CARD_MIME = "text/html;profile=mcp-app"
+#: JSON-RPC "invalid params": the server's schema refused a tool's arguments.
+INVALID_PARAMS = -32602
+#: How the MCP SDK words that refusal when it returns it as a tool result.
+#: Anchored: a tool's own error (an execute_intent JSON quoting a node's
+#: -32602) is the server's words and stays whole.
+_VALIDATION_RE = re.compile(r"\s*(?:MCP error -32602:|Input validation error:)")
+
+log = logging.getLogger(__name__)
 
 
 class MCPError(Exception):
-    """Transport- or protocol-level failure (unreachable, bad response)."""
+    """Transport- or protocol-level failure (unreachable, bad response).
+
+    ``detail`` keeps the server's full text when the message is a shortened,
+    readable form of it.
+    """
+
+    def __init__(self, message: str = "", detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
 
 
 class ToolError(MCPError):
@@ -58,6 +76,41 @@ def result_text(result: dict) -> str:
         for block in content
         if isinstance(block, dict) and block.get("type") == "text"
     ).strip()
+
+
+def _issue_text(issue) -> str | None:
+    if not isinstance(issue, dict):
+        return None
+    message = str(issue.get("message") or "").strip()
+    path = ".".join(str(part) for part in issue.get("path") or [])
+    if path and message:
+        return f"{path}: {message}"
+    return message or (f"{path}: not accepted" if path else None)
+
+
+def validation_message(text: str, code=None) -> str | None:
+    """A readable form of an input-validation (-32602) error, or None when
+    ``text`` is not one.
+
+    The server reports a schema refusal as ``MCP error -32602: Input
+    validation error: Invalid arguments for tool X: [<zod issues as JSON>]``;
+    this keeps each issue's field and message (``amount: A decimal number,
+    e.g. "1.5"``) and drops the JSON.
+    """
+    text = str(text or "")
+    if code != INVALID_PARAMS and not _VALIDATION_RE.match(text):
+        return None
+    start, end = text.find("["), text.rfind("]")
+    if 0 <= start < end:
+        try:
+            issues = json.loads(text[start:end + 1])
+        except ValueError:
+            issues = None
+        if isinstance(issues, list):
+            readable = [line for line in map(_issue_text, issues) if line]
+            if readable:
+                return "; ".join(readable)
+    return "CoinFello did not accept those arguments."
 
 
 def _parse_sse(text: str) -> list:
@@ -172,7 +225,15 @@ class CoinFelloMCP:
     @staticmethod
     def _raise_rpc_error(message: dict, context: str):
         error = message.get("error") or {}
-        raise MCPError(f"{context}: {error.get('message') or error}")
+        text = f"{context}: {error.get('message') or error}"
+        readable = (
+            validation_message(str(error.get("message") or ""), error.get("code"))
+            if isinstance(error, dict) else None
+        )
+        if readable:
+            log.warning("CoinFello %s", text)
+            raise MCPError(readable, detail=text)
+        raise MCPError(text)
 
     # -- protocol ------------------------------------------------------------
 
@@ -254,31 +315,55 @@ class CoinFelloMCP:
         result = (message or {}).get("result") or {}
         return result.get("tools") or []
 
-    def call_tool_result(self, name: str, arguments: dict | None = None, *, _retry: bool = True) -> dict:
-        """Call a tool; returns the raw CallToolResult (``content``,
-        ``structuredContent``, ``isError``), without raising on ``isError``.
-
-        MCP App cards need the result exactly as the server sent it: the card
-        renders ``structuredContent`` and handles its own tool errors.
-        """
+    def _call_tool_raw(self, name: str, arguments: dict | None, retry: bool) -> dict:
         self.ensure_initialized()
         try:
             message = self._rpc("tools/call", {"name": name, "arguments": dict(arguments or {})})
         except SessionExpired:
-            if not _retry:
+            if not retry:
                 raise
             self.initialize()
-            return self.call_tool_result(name, arguments, _retry=False)
+            return self._call_tool_raw(name, arguments, False)
         if message is None:
             raise MCPError(f"{name}: no response from server")
         result = message.get("result")
         return result if isinstance(result, dict) else {}
 
+    @staticmethod
+    def _readable_refusal(name: str, result: dict) -> str | None:
+        """The readable form of an input-validation error result (logged in
+        full), or None for any other result."""
+        if not result.get("isError"):
+            return None
+        text = result_text(result)
+        readable = validation_message(text)
+        if readable:
+            log.warning("CoinFello %s refused its arguments: %s", name, text)
+        return readable
+
+    def call_tool_result(self, name: str, arguments: dict | None = None, *, _retry: bool = True) -> dict:
+        """Call a tool; returns the raw CallToolResult (``content``,
+        ``structuredContent``, ``isError``), without raising on ``isError``.
+
+        MCP App cards need the result exactly as the server sent it: the card
+        renders ``structuredContent`` and handles its own tool errors. The one
+        change: an input-validation error's text becomes its readable form
+        (see ``validation_message``), so no card shows the raw JSON.
+        """
+        result = self._call_tool_raw(name, arguments, _retry)
+        readable = self._readable_refusal(name, result)
+        if readable:
+            return {**result, "content": [{"type": "text", "text": readable}]}
+        return result
+
     def call_tool(self, name: str, arguments: dict | None = None, *, _retry: bool = True):
         """Call a tool; returns the parsed JSON payload, or the plain text."""
-        result = self.call_tool_result(name, arguments, _retry=_retry)
+        result = self._call_tool_raw(name, arguments, _retry)
         text = result_text(result)
         if result.get("isError"):
+            readable = self._readable_refusal(name, result)
+            if readable:
+                raise ToolError(readable, detail=text)
             raise ToolError(text or f"{name}: tool reported an error without detail")
         if not text:
             return {}

@@ -277,6 +277,25 @@ function Portfolio({ ctx, onSend, onSwap }) {
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/
 
+/* amount:start */
+// The server takes a plain decimal with a leading digit ("0.001", not
+// ".001"). Same rules as coinfello_core.normalize_amount, which the backend
+// applies again; tests/amount_cases.json holds the two to one table. String
+// operations only: Number() would round away digits a token has.
+const AMOUNT_RE = /^([0-9]*)(?:\.([0-9]*))?$/
+const AMOUNT_HINT = 'Enter an amount like 0.001'
+const AMOUNT_ZERO = 'Enter an amount greater than 0'
+
+function normalizeAmount(value) {
+  const match = AMOUNT_RE.exec(String(value == null ? '' : value).trim())
+  if (!match || !(match[1] || match[2])) return { amount: '', error: AMOUNT_HINT }
+  const whole = match[1].replace(/^0+/, '') || '0'
+  const fraction = (match[2] || '').replace(/0+$/, '')
+  if (whole === '0' && !fraction) return { amount: '', error: AMOUNT_ZERO }
+  return { amount: fraction ? `${whole}.${fraction}` : whole, error: '' }
+}
+/* amount:end */
+
 function heldTokens(portfolio) {
   const rows = []
   for (const network of portfolio.networks || []) {
@@ -325,7 +344,8 @@ function SendFlow({ ctx, portfolio, onClose }) {
   const token = tokens.find((row) => row.key === tokenKey)
 
   const recipientValid = ADDRESS_RE.test(recipient.trim())
-  const canReview = !busy && token && Number(amount) > 0 && recipientValid
+  const parsedAmount = normalizeAmount(amount)
+  const canReview = !busy && token && !parsedAmount.error && recipientValid
 
   const review = async () => {
     if (!canReview) return
@@ -334,7 +354,7 @@ function SendFlow({ ctx, portfolio, onClose }) {
     try {
       const response = await ctx.rest('/send/prepare', {
         method: 'POST',
-        body: { chain_id: token.chain_id, token: token.address, amount: amount.trim(), recipient: recipient.trim() },
+        body: { chain_id: token.chain_id, token: token.address, amount: parsedAmount.amount, recipient: recipient.trim() },
       })
       if (!response || response.ok === false) setError(errorOf(response, 'Could not prepare the send'))
       else {
@@ -477,6 +497,9 @@ function SendFlow({ ctx, portfolio, onClose }) {
           jsx(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: !token, onClick: () => token && setAmount(token.balance), children: 'Max' }),
         ],
       }),
+      amount.trim() && parsedAmount.error
+        ? jsx('div', { className: cn('text-[0.6875rem]', down), children: parsedAmount.error })
+        : null,
       jsx(Input, { value: recipient, placeholder: 'Recipient address (0x…)', spellCheck: false, onChange: (e) => setRecipient(e.target.value) }),
       recipient && !recipientValid
         ? jsx('div', { className: cn('text-[0.6875rem]', down), children: 'Enter a full 0x address (42 characters).' })
