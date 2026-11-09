@@ -9,6 +9,10 @@
  * the plugin backend (coinfello_portfolio.py). Deeper views open in
  * CoinFello itself.
  *
+ * Cards the agent shows (coinfello_show_card) appear at the top of the pane:
+ * CoinFello's MCP App cards, each in a sandboxed frame, with the MCP Apps
+ * bridge answered here (see "MCP App cards" below).
+ *
  * All data flows through the plugin's Python backend at
  * /api/plugins/coinfello — this file never sees the session token.
  */
@@ -962,6 +966,488 @@ function EmailSignIn({ ctx, status, refresh }) {
   })
 }
 
+// -- MCP App cards: the host half of the MCP Apps bridge -------------------------
+//
+// The agent's coinfello_show_card stores a card record in the backend and
+// emits plugin.coinfello.card.shown. The pane fetches /cards/{id} (a ready
+// data: document with its CSP, the tool input and the raw tool result),
+// mounts it in a SandboxedFrame (allow-scripts only: opaque origin, no
+// storage, no popups) and answers the card's JSON-RPC.
+//
+// Everything between the card-bridge markers is plain JavaScript with no
+// React or SDK import, so tests/card_bridge.test.mjs can run it under node.
+
+/* card-bridge:start */
+const CARD_PROTOCOL_VERSION = '2026-01-26'
+const CARD_HEIGHT_MIN = 120
+const CARD_HEIGHT_MAX = 1400
+// Cards target ~480px; a card that overflows the ~300px pane is laid out
+// wider (up to this) and scaled down to fit, never cut off.
+const CARD_LAYOUT_MAX = 560
+const CARD_CALLS_PER_MINUTE = 30
+const CARD_CANCELLED_TEXT = 'Cancelled in Hermes. Nothing was sent.'
+
+// The same tables as coinfello_cards.py (a test keeps them in sync): what a
+// card may relay is checked here AND in the backend.
+const CARD_ALWAYS_RELAYED = ['whoami']
+const CARD_RETRYABLE_TOOLS = [
+  'get_activity', 'get_balances', 'get_deposit_options', 'get_gas_price',
+  'get_lp_positions', 'get_needs_attention', 'get_open_orders', 'get_positions',
+  'get_prices', 'get_quote', 'get_transfer_status', 'get_yields',
+  'prepare_send', 'prepare_swap', 'whoami',
+]
+const CARD_NEVER_RELAYED = [
+  'sign_out', 'fello_chat', 'fello_job_status', 'start_browser_sign_in',
+  'renew_session', 'create_embed_token', 'set_daily_limit', 'start_limit_change',
+  'get_limit_change', 'sign_in_card_status', 'show_sign_in_card',
+]
+const CARD_TOOLS = {
+  'ui://coinfello/portfolio-card.html': { tool: 'show_portfolio_card', relay: [], confirm: [] },
+  'ui://coinfello/status-card.html': { tool: 'show_status_card', relay: [], confirm: [] },
+  'ui://coinfello/quote-card.html': { tool: 'show_quote_card', relay: ['prepare_swap', 'prepare_send'], confirm: ['execute_intent'] },
+  'ui://coinfello/automations-card.html': { tool: 'show_automations_card', relay: ['pause_automation'], confirm: ['cancel_automation'] },
+  'ui://coinfello/needs-you-card.html': { tool: 'show_needs_you_card', relay: [], confirm: [] },
+  'ui://coinfello/error-card.html': { tool: 'show_error_card', relay: [], confirm: [] },
+  'ui://coinfello/fund-card.html': { tool: 'show_fund_card', relay: [], confirm: [] },
+  'ui://coinfello/yield-card.html': { tool: 'show_yield_card', relay: [], confirm: [] },
+  'ui://coinfello/lp-ranges-card.html': { tool: 'show_lp_ranges_card', relay: [], confirm: [] },
+  'ui://coinfello/perp-card.html': { tool: 'show_perp_card', relay: [], confirm: [] },
+  'ui://coinfello/send-card.html': { tool: 'show_send_card', relay: ['prepare_send'], confirm: ['execute_intent'] },
+  'ui://coinfello/dca-card.html': { tool: 'show_dca_card', relay: ['prepare_dca'], confirm: ['execute_intent'] },
+  'ui://coinfello/earn-deposit-card.html': { tool: 'show_earn_deposit_card', relay: ['prepare_earn_deposit'], confirm: ['execute_intent'] },
+  'ui://coinfello/spend-limit-card.html': { tool: 'show_spend_limit_card', relay: ['prepare_spend_limit'], confirm: ['execute_intent'] },
+}
+
+/** 'relay', 'confirm' (the human decides first) or 'deny'. */
+function cardToolDecision(uri, tool, structured) {
+  const card = Object.prototype.hasOwnProperty.call(CARD_TOOLS, uri) ? CARD_TOOLS[uri] : null
+  if (!card || typeof tool !== 'string' || !tool) return 'deny'
+  if (CARD_NEVER_RELAYED.includes(tool) || tool.startsWith('privy_')) return 'deny'
+  if (card.confirm.includes(tool)) return 'confirm'
+  if (tool === card.tool || card.relay.includes(tool) || CARD_ALWAYS_RELAYED.includes(tool)) return 'relay'
+  if (card.tool === 'show_error_card' && CARD_RETRYABLE_TOOLS.includes(tool) && structured && structured.retryTool === tool) {
+    return 'relay'
+  }
+  return 'deny'
+}
+
+const CARD_SECRET_KEYS = new Set([
+  'sessiontoken', 'embedtoken', 'accesstoken', 'refreshtoken', 'idtoken',
+  'authtoken', 'authorization', 'bearer', 'apikey', 'secret', 'clientsecret',
+  'credentials', 'mnemonic', 'seed', 'seedphrase', 'password', 'privatekey',
+  'cookie',
+])
+const CARD_UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** Drop credential-like keys at any depth (bare `token` is a coin symbol). */
+function stripSecrets(value, depth = 0) {
+  if (depth > 24) return null
+  if (Array.isArray(value)) return value.map((item) => stripSecrets(item, depth + 1))
+  if (!value || typeof value !== 'object') return value
+  const out = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (CARD_UNSAFE_KEYS.has(key) || CARD_SECRET_KEYS.has(key.toLowerCase().replace(/[_-]/g, ''))) continue
+    out[key] = stripSecrets(item, depth + 1)
+  }
+  return out
+}
+
+function clampCardHeight(height) {
+  const value = Number(height)
+  if (!Number.isFinite(value)) return CARD_HEIGHT_MIN
+  return Math.min(CARD_HEIGHT_MAX, Math.max(CARD_HEIGHT_MIN, Math.ceil(value)))
+}
+
+/**
+ * Fit a card to the pane. It lays out at the pane's width; once it reports
+ * content wider than that, it keeps that wider layout (latched, so the frame
+ * does not flip between widths) and is scaled down to the pane.
+ */
+function fitCard({ container, reported, latched }) {
+  const width = Math.max(1, Math.floor(Number(container) || 0))
+  let layout = Number(latched) || 0
+  if (!layout && Number(reported) > width + 1) layout = Math.min(Math.ceil(Number(reported)), CARD_LAYOUT_MAX)
+  if (!layout || layout <= width) return { layoutWidth: width, scale: 1, latched: null }
+  return { layoutWidth: layout, scale: width / layout, latched: layout }
+}
+
+function isHttpsUrl(url) {
+  if (typeof url !== 'string') return false
+  try {
+    return new URL(url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result })
+const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } })
+const rpcNotification = (method, params) => ({ jsonrpc: '2.0', method, params })
+const toolErrorResult = (text) => ({ isError: true, content: [{ type: 'text', text }] })
+
+function cardHostContext({ theme, locale, width }) {
+  return {
+    theme: theme === 'dark' ? 'dark' : 'light',
+    displayMode: 'inline',
+    availableDisplayModes: ['inline'],
+    platform: 'desktop',
+    locale: locale || 'en-US',
+    containerDimensions: { width: Math.floor(Number(width) || 0), maxHeight: CARD_HEIGHT_MAX },
+  }
+}
+
+function cardInitializeResult(context) {
+  return {
+    protocolVersion: CARD_PROTOCOL_VERSION,
+    hostInfo: { name: 'Hermes CoinFello plugin', version: '0.1.0' },
+    hostCapabilities: { openLinks: {}, serverTools: {} },
+    hostContext: cardHostContext(context),
+  }
+}
+
+/** true while under `limit` calls in the last `windowMs`. */
+function createRateLimiter(limit, windowMs, now = () => Date.now()) {
+  const stamps = []
+  return () => {
+    const at = now()
+    while (stamps.length && at - stamps[0] >= windowMs) stamps.shift()
+    if (stamps.length >= limit) return false
+    stamps.push(at)
+    return true
+  }
+}
+
+/**
+ * The host side of one mounted card. `post` sends to the frame; `rest` is
+ * ctx.rest; `confirm(preview)` resolves with the /execute response after the
+ * human pressed Confirm, or null when they cancelled (the bridge itself never
+ * calls /execute); `onSize` gets size-changed params; `context()` returns
+ * { theme, locale, width }.
+ */
+function createCardBridge({ card, post, rest, confirm, openExternal, onSize, context, newId, limiter }) {
+  const structured = (card.tool_result && card.tool_result.structuredContent) || {}
+  const allow = limiter || createRateLimiter(CARD_CALLS_PER_MINUTE, 60000)
+  const makeId = newId || (() => crypto.randomUUID())
+  let disposed = false
+  const send = (message) => {
+    if (!disposed) post(message)
+  }
+
+  const relay = async (id, params) => {
+    const name = params && typeof params.name === 'string' ? params.name : ''
+    const raw = params && params.arguments
+    const args = raw && typeof raw === 'object' && !Array.isArray(raw) ? stripSecrets(raw) : {}
+    const decision = cardToolDecision(card.uri, name, structured)
+    if (decision === 'deny') {
+      send(rpcError(id, -32601, `${name || 'That tool'} is not available from this card in Hermes.`))
+      return
+    }
+    if (!allow()) {
+      send(rpcError(id, -32000, 'Too many requests from this card. Wait a minute.'))
+      return
+    }
+    let response
+    try {
+      response = await rest(`/cards/${card.id}/call`, { method: 'POST', body: { tool: name, arguments: args } })
+    } catch (exc) {
+      send(rpcResult(id, toolErrorResult(String(exc))))
+      return
+    }
+    if (!response || response.ok === false) {
+      send(rpcResult(id, toolErrorResult((response && response.error) || 'Hermes could not complete that.')))
+      return
+    }
+    if (decision !== 'confirm') {
+      send(rpcResult(id, response.result || {}))
+      return
+    }
+    if (!response.confirm) {
+      send(rpcResult(id, toolErrorResult('Hermes could not prepare the confirmation. Nothing was sent.')))
+      return
+    }
+    let executed = null
+    try {
+      executed = await confirm(response.confirm)
+    } catch {
+      executed = null
+    }
+    if (!executed) send(rpcResult(id, toolErrorResult(CARD_CANCELLED_TEXT)))
+    else if (executed.ok === false) send(rpcResult(id, toolErrorResult(executed.error || 'Nothing was sent.')))
+    else send(rpcResult(id, executed.result || {}))
+  }
+
+  const handle = (message) => {
+    if (disposed || !message || typeof message !== 'object' || message.jsonrpc !== '2.0') return
+    const { id, method, params } = message
+    if (typeof method !== 'string') return // a response to our teardown: nothing waits on it
+    if (id === undefined || id === null) {
+      if (method === 'ui/notifications/initialized') {
+        send(rpcNotification('ui/notifications/tool-input', card.tool_input || { arguments: {} }))
+        send(rpcNotification('ui/notifications/tool-result', card.tool_result || {}))
+      } else if (method === 'ui/notifications/size-changed') {
+        onSize(params || {})
+      }
+      return
+    }
+    if (method === 'ui/initialize') send(rpcResult(id, cardInitializeResult(context())))
+    else if (method === 'tools/call') relay(id, params)
+    else if (method === 'ui/open-link') {
+      const url = params && params.url
+      if (isHttpsUrl(url)) {
+        openExternal(url)
+        send(rpcResult(id, {}))
+      } else {
+        send(rpcResult(id, toolErrorResult('Only https links open from a card.')))
+      }
+    } else if (method === 'ping') send(rpcResult(id, {}))
+    else send(rpcError(id, -32601, `Hermes does not support ${method}.`))
+  }
+
+  return {
+    handle,
+    notifyContext: (partial) => send(rpcNotification('ui/notifications/host-context-changed', partial)),
+    dispose: () => {
+      send({ jsonrpc: '2.0', id: makeId(), method: 'ui/resource-teardown', params: {} })
+      disposed = true
+    },
+  }
+}
+/* card-bridge:end */
+
+const CARD_SHOWN_EVENT = 'plugin.coinfello.card.shown'
+
+const currentTheme = () => (document.documentElement.classList.contains('dark') ? 'dark' : 'light')
+
+function ConfirmSheet({ ctx, cardId, preview, onDone }) {
+  const [busy, setBusy] = useState(false)
+  const [expired, setExpired] = useState(!(preview.expires_in_seconds > 0))
+  const isTrade = preview.tool === 'execute_intent'
+
+  const confirmNow = async () => {
+    setBusy(true)
+    let response
+    try {
+      response = await ctx.rest(`/cards/${cardId}/execute`, {
+        method: 'POST',
+        body: { confirm_id: preview.confirm_id },
+        timeoutMs: 180000,
+      })
+    } catch (exc) {
+      response = {
+        ok: false,
+        error: isTrade
+          ? `Hermes lost the answer (${String(exc)}). It may have gone through: check your CoinFello activity before trying again.`
+          : String(exc),
+      }
+    }
+    onDone(response || { ok: false, error: 'No response' })
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-2 rounded-md border border-(--ui-stroke-secondary) p-2',
+    children: [
+      jsx('div', { className: 'text-xs font-medium', children: preview.title }),
+      jsx('div', { className: 'text-xs', children: preview.description }),
+      (preview.rows || []).length
+        ? jsx('div', {
+            className: 'flex flex-col gap-1',
+            children: preview.rows.map(([label, value], index) => jsx(Row, { label, value }, index)),
+          })
+        : null,
+      isTrade
+        ? jsx('div', {
+            className: cn('text-[0.6875rem]', muted),
+            children: 'This runs from your automations wallet right away. Transactions cannot be reversed.',
+          })
+        : null,
+      expired
+        ? jsx('div', { className: cn('text-xs', down), children: 'This confirmation expired. Ask the card for a fresh one.' })
+        : jsxs('div', {
+            className: cn('text-[0.6875rem]', muted),
+            children: ['Valid for ', jsx(Countdown, { seconds: preview.expires_in_seconds, onExpired: () => setExpired(true) })],
+          }),
+      jsxs('div', {
+        className: 'flex gap-2',
+        children: [
+          jsx(Button, { size: 'sm', loading: busy, disabled: expired, onClick: confirmNow, children: isTrade ? 'Confirm' : 'Cancel automation' }),
+          jsx(Button, { size: 'sm', variant: 'ghost', disabled: busy, onClick: () => onDone(null), children: isTrade ? 'Cancel' : 'Keep it' }),
+        ],
+      }),
+    ],
+  })
+}
+
+function CardFrame({ ctx, card }) {
+  const queryClient = useQueryClient()
+  const frameRef = useRef(null)
+  const boxRef = useRef(null)
+  const [height, setHeight] = useState(240)
+  const [reported, setReported] = useState(0)
+  const [latched, setLatched] = useState(null)
+  const [container, setContainer] = useState(0)
+  const [confirmation, setConfirmation] = useState(null)
+
+  // The pane can be resized: re-fit from scratch when its width changes
+  // (not when the card's own height does).
+  useEffect(() => {
+    const box = boxRef.current
+    if (!box) return undefined
+    let width = -1
+    const update = () => {
+      if (box.clientWidth === width) return
+      width = box.clientWidth
+      setContainer(width)
+      setLatched(null)
+    }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(box)
+    return () => observer.disconnect()
+  }, [])
+
+  const fit = fitCard({ container, reported, latched })
+  useEffect(() => {
+    if (fit.latched !== latched) setLatched(fit.latched)
+  }, [fit.latched, latched])
+
+  useEffect(() => {
+    const post = (message) => {
+      const frame = frameRef.current
+      // A sandboxed (opaque-origin) frame can only be addressed with '*'.
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage(message, '*')
+    }
+    const bridge = createCardBridge({
+      card,
+      post,
+      rest: (path, options) => ctx.rest(path, options),
+      confirm: (preview) => new Promise((resolve) => setConfirmation({ preview, resolve })),
+      openExternal: (url) => ctx.os.openExternal(url),
+      onSize: (params) => {
+        if (Number(params.height) > 0) setHeight(clampCardHeight(params.height))
+        if (Number(params.width) > 0) setReported(Number(params.width))
+      },
+      context: () => ({
+        theme: currentTheme(),
+        locale: navigator.language,
+        width: boxRef.current ? boxRef.current.clientWidth : 0,
+      }),
+    })
+    const onMessage = (event) => {
+      const frame = frameRef.current
+      // Only this card's own frame speaks to this bridge.
+      if (!frame || event.source !== frame.contentWindow) return
+      bridge.handle(event.data)
+    }
+    window.addEventListener('message', onMessage)
+    let theme = currentTheme()
+    const observer = new MutationObserver(() => {
+      const next = currentTheme()
+      if (next !== theme) {
+        theme = next
+        bridge.notifyContext({ theme: next })
+      }
+    })
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    return () => {
+      window.removeEventListener('message', onMessage)
+      observer.disconnect()
+      bridge.dispose()
+      setConfirmation((open) => {
+        if (open) open.resolve(null)
+        return null
+      })
+    }
+  }, [card.id, ctx])
+
+  const finish = (response) => {
+    if (!confirmation) return
+    confirmation.resolve(response)
+    setConfirmation(null)
+    if (response && response.ok !== false) queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-2',
+    children: [
+      confirmation ? jsx(ConfirmSheet, { ctx, cardId: card.id, preview: confirmation.preview, onDone: finish }) : null,
+      jsx('div', {
+        ref: boxRef,
+        className: 'relative w-full overflow-hidden',
+        style: { height: Math.ceil(height * fit.scale) },
+        children: container
+          ? jsx(SandboxedFrame, {
+              ref: frameRef,
+              src: card.src,
+              title: `CoinFello ${card.title || 'card'}`,
+              sandbox: 'allow-scripts',
+              className: 'block',
+              style: {
+                width: fit.layoutWidth,
+                height,
+                transform: fit.scale === 1 ? undefined : `scale(${fit.scale})`,
+                transformOrigin: 'top left',
+              },
+            })
+          : null,
+      }),
+    ],
+  })
+}
+
+function CardSlot({ ctx, summary, onDismiss }) {
+  // Outside the ['coinfello'] prefix: the pane's own refreshes must not
+  // reload a mounted card.
+  const cardDoc = useQuery({
+    queryKey: ['coinfello-card', summary.id],
+    queryFn: () => ctx.rest(`/cards/${summary.id}?theme=${currentTheme()}`),
+    staleTime: Infinity,
+  })
+  const data = cardDoc.data
+  return jsxs('div', {
+    className: 'flex flex-col gap-1',
+    children: [
+      jsxs('div', {
+        className: cn(row, 'text-[0.6875rem]', muted),
+        children: [
+          jsx('span', { className: 'min-w-0 truncate font-medium', children: summary.title || 'Card' }),
+          jsx(Button, { variant: 'ghost', size: 'sm', title: 'Close card', onClick: () => onDismiss(summary.id), children: jsx(Codicon, { name: 'close', size: 12 }) }),
+        ],
+      }),
+      !data
+        ? jsx('div', { className: cn('text-xs', muted), children: 'Loading card…' })
+        : data.ok === false
+          ? jsx('div', { className: cn('text-xs', muted), children: errorOf(data, 'Could not load this card.') })
+          : jsx(CardFrame, { ctx, card: data }),
+    ],
+  })
+}
+
+function Cards({ ctx }) {
+  const queryClient = useQueryClient()
+  const list = useQuery({
+    queryKey: ['coinfello', 'cards'],
+    queryFn: () => ctx.rest('/cards'),
+    // The event is instant; this catches Hermes builds without it.
+    refetchInterval: 20 * 1000,
+  })
+  useEffect(() => {
+    if (typeof ctx.onEvent !== 'function') return undefined
+    return ctx.onEvent(CARD_SHOWN_EVENT, () => queryClient.invalidateQueries({ queryKey: ['coinfello', 'cards'] }))
+  }, [ctx, queryClient])
+
+  const dismiss = async (id) => {
+    await ctx.rest(`/cards/${id}/dismiss`, { method: 'POST', body: {} })
+    queryClient.invalidateQueries({ queryKey: ['coinfello', 'cards'] })
+  }
+
+  const items = (list.data && list.data.ok !== false && list.data.cards) || []
+  if (items.length === 0) return null
+  return jsx('div', {
+    className: 'flex flex-col gap-3 border-b border-(--ui-stroke-secondary) pb-3',
+    children: items.slice(0, 3).map((card) => jsx(CardSlot, { ctx, summary: card, onDismiss: dismiss }, card.id)),
+  })
+}
+
 // -- pane ----------------------------------------------------------------------
 
 function Pane({ ctx }) {
@@ -1006,6 +1492,7 @@ function Pane({ ctx }) {
   } else if (connected) {
     body = jsxs(Fragment, {
       children: [
+        jsx(Cards, { ctx }),
         data.pending_approval_id
           ? jsx(PendingSignIn, { ctx, status: data, refresh, upgrade: !!data.pending_upgrade })
           : jsx(AccessBadge, { ctx, status: data, refresh }),
