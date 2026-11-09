@@ -179,6 +179,24 @@ def test_a_resource_answered_for_another_uri_is_refused(server):
         _client(server).read_resource("ui://coinfello/portfolio-card.html")
 
 
+def test_the_client_never_advertises_mcp_apps_and_names_itself(server):
+    # Card tools then answer with their full text on every surface; the
+    # plugin decides per surface what the model reads.
+    client = _client(server)
+    assert client._headers()["User-Agent"] == "hermes-coinfello-plugin/0.1.0"
+    sent = {}
+    original = client._post
+
+    def spy(payload):
+        if payload.get("method") == "initialize":
+            sent.update(payload["params"])
+        return original(payload)
+
+    client._post = spy
+    client.initialize()
+    assert "extensions" not in sent["capabilities"]
+
+
 def test_the_mime_check_ignores_case_and_spacing(server):
     server.mock_state["resource_mime"] = "Text/HTML; profile=mcp-app"
     resource = _client(server).read_resource("ui://coinfello/portfolio-card.html")

@@ -111,6 +111,10 @@ class CoinFelloMCP:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
+            # Our own name, not Python-urllib's: coinfello-web remembers per
+            # user-agent whether a client renders MCP App cards, and must not
+            # mistake this plugin for another Python client that does.
+            "User-Agent": f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']}",
         }
         if self.session_token:
             headers["Authorization"] = f"Bearer {self.session_token}"
