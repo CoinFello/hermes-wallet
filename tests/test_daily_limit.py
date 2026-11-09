@@ -139,3 +139,14 @@ def test_servers_without_adjustable_limits_say_so(mock_mcp, isolated_state, monk
         core.change_daily_limit(100)
     step = next(s for s in core.sign_in_steps("C0DE", "https://x/authorize") if "Read only" in s)
     assert "custom" not in step and "without signing in again" not in step
+
+
+def test_lowering_forgets_a_pending_raise(trading):
+    # the server cancels a pending raise when the session
+    # lowers its limit, so an old link cannot undo the lowering.
+    core.change_daily_limit(5000)
+    assert core.status()["pending_limit_requested"] == 5000
+    core.change_daily_limit(10)
+    status = core.status()
+    assert "pending_limit_change_url" not in status
+    assert status["daily_limit_usd"] == 10

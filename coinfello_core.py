@@ -834,6 +834,10 @@ def change_daily_limit(limit_usd: Any) -> dict:
             if not isinstance(result, dict):
                 raise RuntimeError(_text(result))
             _store_access(result)
+            # The server cancels any pending raise when a session lowers its
+            # limit (so an old approval link cannot undo the lowering); forget
+            # ours too, or the pane would keep waiting on a dead link.
+            cancel_limit_change()
             out = {"ok": True, "status": "changed", **_access_summary(load_state())}
             for key in ("spent_today_usd", "remaining_today_usd"):
                 if result.get(key) is not None:
