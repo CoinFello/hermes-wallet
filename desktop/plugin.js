@@ -132,7 +132,7 @@ const STYLES = `
   font-variant-numeric: tabular-nums; }
 .cf-net-name { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 600; color: var(--ui-text-primary); }
 .cf-net-name > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cf-net-logo { width: 16px; height: 16px; flex: none; border-radius: 4px; object-fit: cover; }
+.cf-net-logo { width: 16px; height: 16px; flex: none; border-radius: 50%; object-fit: cover; overflow: hidden; }
 .cf-net-logo.is-letter { display: grid; place-items: center; background: var(--ui-bg-quaternary); color: var(--ui-text-secondary);
   font-size: 9px; font-weight: 600; }
 .cf-token { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 7px 4px; border-radius: 9px; }
