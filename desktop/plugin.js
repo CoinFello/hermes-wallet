@@ -25,8 +25,8 @@ import {
   SelectTrigger,
   SelectValue,
   StatusDot,
-  ToggleRow,
   cn,
+  host,
   useQuery,
   useQueryClient,
 } from '@hermes/plugin-sdk'
@@ -42,7 +42,8 @@ const ID = 'coinfello'
 // --ui-red, --font-sans / --font-mono) carry every surface, text and state
 // colour, so the pane follows whatever theme is active. Actions and highlights
 // use the theme's accent (--dt-primary, as Hermes' own primary buttons do);
-// Settings > Appearance can switch them to CoinFello's yellow. CoinFello
+// Settings > Appearance offers a Hermes theme / CoinFello theme choice
+// (CoinFello's yellow). CoinFello
 // also contributes the serif portfolio figure
 // (Libre Baskerville, as on app.coinfello.com, falling back to system serifs),
 // tabular figures, round token icons and rounded cards. The two brand colours
@@ -181,7 +182,30 @@ const STYLES = `
 .cf-allow-figure { margin-top: 8px; font-family: var(--cf-serif); font-size: 24px; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .cf-allow-figure small { font-family: var(--font-sans); font-size: 12px; color: var(--ui-text-tertiary); margin-left: 3px; }
 .cf-meter { height: 6px; margin: 10px 0 6px; border-radius: 999px; background: var(--ui-bg-quaternary); overflow: hidden; }
-.cf-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-accent); }
+.cf-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-accent); transition: width .3s ease; }
+.cf-allow-left .cf-allow-figure small { margin-left: 6px; }
+.cf-allow-left > .cf-hint:first-of-type { margin-top: 2px; }
+.cf-meter-legend { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 11.5px;
+  color: var(--ui-text-tertiary); font-variant-numeric: tabular-nums; margin-bottom: 6px; }
+.cf-meter-legend > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.cf-meter-legend b { font-weight: 600; color: var(--ui-text-primary); }
+.cf-swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.cf-swatch.is-left { background: var(--cf-accent); }
+.cf-swatch.is-used { background: var(--ui-bg-quaternary); box-shadow: inset 0 0 0 1px var(--ui-stroke-secondary, var(--ui-stroke-tertiary)); }
+.cf-meter.is-empty { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cf-warn) 60%, transparent); }
+
+.cf-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cf-radios { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.cf-radio { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--ui-stroke-tertiary); }
+.cf-radio:hover { background: var(--chrome-action-hover); }
+.cf-radio.is-checked { border-color: color-mix(in srgb, var(--cf-accent) 70%, var(--ui-stroke-tertiary));
+  background: color-mix(in srgb, var(--cf-accent) 8%, transparent); }
+.cf-radio input { flex: none; width: 15px; height: 15px; margin: 0; accent-color: var(--cf-accent); cursor: pointer; }
+.cf-radio input:focus-visible { outline: 2px solid color-mix(in srgb, var(--cf-accent) 70%, var(--ui-text-primary)); outline-offset: 2px; }
+.cf-radio-text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.cf-radio-label { font-size: 12.5px; font-weight: 500; color: var(--ui-text-primary); }
+.cf-radio-swatch { width: 16px; height: 16px; flex: none; border-radius: 50%; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-text-primary) 15%, transparent); }
 .cf-stack { display: flex; flex-direction: column; gap: 10px; }
 .cf-ok { font-size: 12px; color: var(--ui-green); }
 .cf-err { font-size: 12px; color: var(--ui-red); }
@@ -190,7 +214,7 @@ const STYLES = `
 .cf-skeleton { border-radius: 8px; background: var(--ui-bg-quaternary); animation: cf-pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
   .cf-skeleton { animation: none; }
-  .cf-action-icon { transition: none; }
+  .cf-action-icon, .cf-meter > span { transition: none; }
 }
 `
 
@@ -452,6 +476,7 @@ function Assets({ ctx }) {
   if (!data || data.ok === false) return null
   const networks = data.networks || []
   const appOrigin = originOf(data.portfolio_url)
+  const inApp = data.can_view_portfolio === true && canOpenTabs()
   return jsxs('section', {
     className: 'cf-section',
     children: [
@@ -537,9 +562,23 @@ function Assets({ ctx }) {
       jsxs('div', {
         className: 'cf-links',
         children: [
-          jsx(LinkPill, { ctx, url: data.portfolio_url, label: 'Full portfolio' }),
+          inApp
+            ? jsxs('button', {
+                type: 'button',
+                className: 'cf-link',
+                onClick: () => openPortfolioTab(ctx, appOrigin),
+                children: ['Full portfolio', jsx(Codicon, { name: 'arrow-right', size: 11 })],
+              })
+            : jsx(LinkPill, { ctx, url: data.portfolio_url, label: 'Full portfolio' }),
           jsx(LinkPill, { ctx, url: data.strategies_url, label: 'Strategies' }),
         ],
+      }),
+      jsx('div', {
+        className: 'cf-hint',
+        style: { padding: '0 2px' },
+        children: inApp
+          ? 'Strategies opens in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.'
+          : 'These open in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.',
       }),
     ],
   })
@@ -783,25 +822,28 @@ function allowedEmbedLink(raw) {
 
 const txUrl = (hash) => (/^0x[0-9a-fA-F]{64}$/.test(String(hash || '')) ? `https://blockscan.com/tx/${hash}` : null)
 
-function SwapEmbed({ ctx, appUrl, onClose }) {
-  const queryClient = useQueryClient()
-  const frameRef = useRef(null)
-  const tokenSentRef = useRef(false)
-  const [mount, setMount] = useState(0)
-  const [height, setHeight] = useState(560)
-  // Fallback "View" for embeds that cannot open links through us (they say
-  // so by NOT advertising 'open-url'); an embed that can shows its own.
-  const [fallbackViewUrl, setFallbackViewUrl] = useState(null)
-  const embedOpensLinksRef = useRef(false)
-  const [error, setError] = useState('')
+const embedSrc = (appUrl, path, dark) =>
+  `${String(appUrl || '').replace(/\/$/, '')}${path}?theme=${dark ? 'dark' : 'light'}`
 
-  const dark = document.documentElement.classList.contains('dark')
-  const src = `${String(appUrl || '').replace(/\/$/, '')}/embed/swap?theme=${dark ? 'dark' : 'light'}`
+/**
+ * The parent half of CoinFello's embed protocol, shared by every embedded
+ * view (swap, portfolio):
+ *   <- coinfello:embed-ready {version, features?, nonce?}  first load / token expired
+ *   -> coinfello:embed-token {token, nonce}                 15-minute, one-scope token
+ *   <- coinfello:embed-resize {height}
+ *   <- coinfello:open-url {url}                             allowlisted, 1/s
+ * `onOther` gets any other message from the frame (e.g. swap results).
+ */
+function useEmbedBridge({ ctx, scope, label, frameRef, mount, onOther }) {
+  const [error, setError] = useState('')
+  const [height, setHeight] = useState(560)
+  const opensLinksRef = useRef(false)
+  const onOtherRef = useRef(onOther)
+  onOtherRef.current = onOther
 
   useEffect(() => {
-    tokenSentRef.current = false
-    embedOpensLinksRef.current = false
-    setFallbackViewUrl(null)
+    opensLinksRef.current = false
+    let tokenSent = false
     // Per-mount secret, handed to the embed with its first token. Later token
     // requests (the embed asks again when a token expires) must echo it: a
     // document the frame navigated to never saw it, so it gets nothing.
@@ -810,13 +852,13 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
     let lastOpenAt = 0
     const sendToken = async (frame) => {
       lastSentAt = Date.now()
-      const minted = await ctx.rest('/embed-token', { method: 'POST', body: {} })
+      const minted = await ctx.rest('/embed-token', { method: 'POST', body: { scope } })
       if (!minted || minted.ok === false) {
-        setError(errorOf(minted, 'Could not open swap'))
+        setError(errorOf(minted, `Could not open ${label}`))
         return
       }
       // A sandboxed (opaque-origin) frame can only be addressed with '*';
-      // the token is short-lived and swap-scoped.
+      // the token is short-lived and limited to this one view.
       frame.contentWindow.postMessage({ type: 'coinfello:embed-token', token: minted.token, nonce }, '*')
     }
     const onMessage = async (event) => {
@@ -825,26 +867,26 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
       if (!frame || event.source !== frame.contentWindow) return
       const message = event.data || {}
       if (message.type === 'coinfello:embed-ready') {
-        embedOpensLinksRef.current = Array.isArray(message.features) && message.features.includes('open-url')
-        if (!tokenSentRef.current) {
-          tokenSentRef.current = true
+        opensLinksRef.current = Array.isArray(message.features) && message.features.includes('open-url')
+        if (!tokenSent) {
+          tokenSent = true
           await sendToken(frame)
         } else if (message.nonce === nonce) {
           // Tokens live 15 minutes. A re-request within a minute of the last
           // token means the session itself is gone (signed out, revoked):
           // minting more would loop, so stop and say so.
           if (Date.now() - lastSentAt < 60000) {
-            setError('Your CoinFello session ended. Sign in again, then reopen Swap.')
+            setError(`Your CoinFello session ended. Sign in again, then reopen ${label}.`)
             return
           }
           await sendToken(frame) // an expired token, from the same document
         } else {
-          setError('The swap view reloaded. Reopen it to continue.')
+          setError(`The ${label} view reloaded. Reopen it to continue.`)
         }
       } else if (message.type === 'coinfello:embed-resize' && Number(message.height) > 0) {
         setHeight(Math.min(1200, Math.max(240, Number(message.height))))
       } else if (message.type === 'coinfello:open-url') {
-        // The embed's own "View" links (the sandbox blocks popups): open only
+        // The embed's own links (the sandbox blocks popups): open only
         // allowlisted https explorers, at most once a second.
         const url = allowedEmbedLink(message.url)
         const now = Date.now()
@@ -852,16 +894,40 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
           lastOpenAt = now
           ctx.os.openExternal(url)
         }
-      } else if (message.type === 'coinfello:swap-result') {
-        queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
-        if (message.status === 'success' && !embedOpensLinksRef.current) {
-          setFallbackViewUrl(txUrl(message.transactionHash))
-        }
+      } else if (onOtherRef.current) {
+        onOtherRef.current(message, opensLinksRef.current)
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [mount, ctx, queryClient])
+  }, [mount, ctx, scope, label, frameRef])
+
+  return { error, setError, height }
+}
+
+function SwapEmbed({ ctx, appUrl, onClose }) {
+  const queryClient = useQueryClient()
+  const frameRef = useRef(null)
+  const [mount, setMount] = useState(0)
+  // Fallback "View" for embeds that cannot open links through us (they say
+  // so by NOT advertising 'open-url'); an embed that can shows its own.
+  const [fallbackViewUrl, setFallbackViewUrl] = useState(null)
+  const dark = document.documentElement.classList.contains('dark')
+  const src = embedSrc(appUrl, '/embed/swap', dark)
+
+  useEffect(() => setFallbackViewUrl(null), [mount])
+  const { error, setError, height } = useEmbedBridge({
+    ctx,
+    scope: 'swap',
+    label: 'Swap',
+    frameRef,
+    mount,
+    onOther: (message, embedOpensLinks) => {
+      if (message.type !== 'coinfello:swap-result') return
+      queryClient.invalidateQueries({ queryKey: ['coinfello', 'portfolio'] })
+      if (message.status === 'success' && !embedOpensLinks) setFallbackViewUrl(txUrl(message.transactionHash))
+    },
+  })
 
   return jsxs('div', {
     className: 'flex flex-col gap-2',
@@ -914,6 +980,88 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
 // The approval page's steps, from the backend (coinfello_core.sign_in_steps),
 // so the pane and the agent always describe the same order: open the page,
 // sign in to CoinFello, type the code, choose access, approve.
+// -- in-app portfolio: coinfello-web /embed/portfolio in a main-area tab ------
+//
+// The browser link opens the full web app, whose wallet layer reconnects a
+// browser-extension wallet (MetaMask) and can sign in as the wrong account.
+// The embed shows this plugin's own account: a 15-minute, read-only,
+// portfolio-scoped token, no cookies, no wallet connection.
+
+const PORTFOLIO_TAB_ID = 'coinfello-portfolio'
+let closePortfolioTab = null
+
+function PortfolioWorkspace({ ctx, appUrl }) {
+  const frameRef = useRef(null)
+  const [mount, setMount] = useState(0)
+  const [dark] = useState(() => document.documentElement.classList.contains('dark'))
+  const { error, setError } = useEmbedBridge({ ctx, scope: 'portfolio', label: 'Portfolio', frameRef, mount })
+  return jsxs('div', {
+    className: 'cf',
+    style: { padding: 0, gap: 0, overflow: 'hidden' },
+    children: [
+      jsxs('header', {
+        className: 'cf-header',
+        style: { padding: '8px 14px', borderBottom: '1px solid var(--ui-stroke-tertiary)' },
+        children: [
+          jsxs('div', {
+            className: 'flex items-center gap-2',
+            children: [jsx(Logo, {}), jsx('span', { className: 'cf-subhead-title', children: 'Portfolio' })],
+          }),
+          jsx('button', {
+            type: 'button',
+            className: 'cf-icon-btn',
+            title: 'Reload',
+            'aria-label': 'Reload portfolio',
+            onClick: () => { setError(''); setMount(mount + 1) },
+            children: jsx(Codicon, { name: 'refresh', size: 15 }),
+          }),
+        ],
+      }),
+      error
+        ? jsxs('div', {
+            className: 'cf-notice',
+            style: { margin: 12, width: 'auto', cursor: 'default' },
+            children: [
+              jsx(Codicon, { name: 'warning', size: 14 }),
+              jsx('span', { className: 'cf-notice-text', children: error }),
+              jsx(Button, { size: 'sm', variant: 'outline', onClick: () => { setError(''); setMount(mount + 1) }, children: 'Reopen' }),
+            ],
+          })
+        : null,
+      jsx(SandboxedFrame, {
+        key: mount,
+        ref: frameRef,
+        src: embedSrc(appUrl, '/embed/portfolio', dark),
+        title: 'CoinFello portfolio',
+        sandbox: 'allow-scripts allow-forms',
+        style: { flex: 1, width: '100%', minHeight: 0, border: 0 },
+      }),
+    ],
+  })
+}
+
+/** True when this desktop can dock a plugin tab into the main area. */
+const canOpenTabs = () => typeof host?.openWorkspace === 'function'
+
+function openPortfolioTab(ctx, appUrl) {
+  closePortfolioTab = host.openWorkspace(PORTFOLIO_TAB_ID, {
+    title: 'CoinFello portfolio',
+    minWidth: '420px',
+    render: () => jsx(PortfolioWorkspace, { ctx, appUrl }),
+    onClose: () => {
+      closePortfolioTab = null
+    },
+  })
+}
+
+function closePortfolio() {
+  if (closePortfolioTab) {
+    const close = closePortfolioTab
+    closePortfolioTab = null
+    close()
+  }
+}
+
 function PendingSignIn({ ctx, status, refresh, upgrade }) {
   const [error, setError] = useState('')
   const code = status.pending_user_code
@@ -1060,6 +1208,74 @@ function useLimitPoll(ctx, pendingUrl, refresh, report) {
   }, [pendingUrl, ctx, refresh, report])
 }
 
+/**
+ * Whole-number percent that never claims 0% or 100% when that is not exact,
+ * so a $0.10 trade on a $100 allowance reads ">99% left", not "100% left".
+ */
+function percentText(part, whole) {
+  if (!(whole > 0)) return '0%'
+  const p = (part / whole) * 100
+  if (p <= 0) return '0%'
+  if (p >= 100) return '100%'
+  if (p < 1) return '<1%'
+  if (p > 99) return '>99%'
+  return `${Math.round(p)}%`
+}
+
+/**
+ * What is left to trade today. The headline is the amount LEFT (not the
+ * limit), and the bar is a fuel gauge: the filled part is what is left and
+ * empties as trades spend it, with both segments labelled in $ and %.
+ */
+function AllowanceLeft({ limit, remaining, spent }) {
+  const left = Math.max(0, Math.min(limit, remaining))
+  const used = spent != null && Number.isFinite(Number(spent)) ? Math.max(0, Number(spent)) : Math.max(0, limit - left)
+  const leftShare = limit > 0 ? (left / limit) * 100 : 0
+  return jsxs('div', {
+    className: 'cf-allow-left',
+    children: [
+      jsxs('div', {
+        className: 'cf-allow-figure',
+        children: [money(left), jsx('small', { children: 'left to trade today' })],
+      }),
+      jsx('div', {
+        className: 'cf-hint',
+        children: `${percentText(left, limit)} of your ${money(limit)} daily allowance`,
+      }),
+      jsx('div', {
+        className: cn('cf-meter', left <= 0 && 'is-empty'),
+        role: 'meter',
+        'aria-valuemin': 0,
+        'aria-valuemax': limit,
+        'aria-valuenow': left,
+        'aria-valuetext': `${money(left)} left of ${money(limit)} (${percentText(left, limit)})`,
+        'aria-label': 'Allowance left to trade today',
+        children: jsx('span', { style: { width: `${leftShare}%` } }),
+      }),
+      jsxs('div', {
+        className: 'cf-meter-legend',
+        children: [
+          jsxs('span', {
+            children: [
+              jsx('i', { className: 'cf-swatch is-left', 'aria-hidden': true }),
+              jsx('b', { children: money(left) }),
+              ` left · ${percentText(left, limit)}`,
+            ],
+          }),
+          jsxs('span', {
+            children: [
+              jsx('i', { className: 'cf-swatch is-used', 'aria-hidden': true }),
+              jsx('b', { children: money(used) }),
+              ` used · ${percentText(used, limit)}`,
+            ],
+          }),
+        ],
+      }),
+      jsx('div', { className: 'cf-hint', children: 'Counts trades from the last 24 hours, so it refills as they age out.' }),
+    ],
+  })
+}
+
 function TradingAllowance({ ctx, status, refresh, message, setMessage }) {
   const [editing, setEditing] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -1125,25 +1341,10 @@ function TradingAllowance({ ctx, status, refresh, message, setMessage }) {
                 : null,
             ],
           }),
-          trading
+          trading && remaining == null
             ? jsxs('div', { className: 'cf-allow-figure', children: [money(current), jsx('small', { children: 'per day' })] })
             : null,
-          trading && remaining != null
-            ? jsxs(Fragment, {
-                children: [
-                  jsx('div', {
-                    className: 'cf-meter',
-                    role: 'meter',
-                    'aria-valuemin': 0,
-                    'aria-valuemax': current,
-                    'aria-valuenow': remaining,
-                    'aria-label': 'Allowance left in the last 24 hours',
-                    children: jsx('span', { style: { width: `${current > 0 ? Math.max(0, Math.min(100, (remaining / current) * 100)) : 0}%` } }),
-                  }),
-                  jsx('div', { className: 'cf-hint', children: `${money(remaining)} left in the last 24 hours` }),
-                ],
-              })
-            : null,
+          trading && remaining != null ? jsx(AllowanceLeft, { limit: current, remaining, spent: status.spent_today_usd }) : null,
         ],
       }),
       !trading && !editing && !pendingUrl
@@ -1193,6 +1394,48 @@ function hostOf(url) {
   } catch {
     return url || ''
   }
+}
+
+const THEMES = [
+  { value: 'hermes', label: 'Hermes theme', description: 'Buttons and highlights use your Hermes accent color.', swatch: 'var(--dt-primary)' },
+  { value: 'coinfello', label: 'CoinFello theme', description: "Buttons and highlights use CoinFello's yellow.", swatch: 'var(--cf-brand)' },
+]
+
+/** Settings > Appearance: one of two named themes, as a native radio group. */
+function ThemePicker({ brand, setBrand }) {
+  const selected = brand ? 'coinfello' : 'hermes'
+  return jsxs('fieldset', {
+    className: 'cf-radios',
+    children: [
+      jsx('legend', { className: 'cf-sr-only', children: 'Pane theme' }),
+      ...THEMES.map((theme) =>
+        jsxs(
+          'label',
+          {
+            className: cn('cf-radio', selected === theme.value && 'is-checked'),
+            children: [
+              jsx('input', {
+                type: 'radio',
+                name: 'coinfello-theme',
+                value: theme.value,
+                checked: selected === theme.value,
+                onChange: () => setBrand(theme.value === 'coinfello'),
+              }),
+              jsxs('span', {
+                className: 'cf-radio-text',
+                children: [
+                  jsx('span', { className: 'cf-radio-label', children: theme.label }),
+                  jsx('span', { className: 'cf-hint', children: theme.description }),
+                ],
+              }),
+              jsx('span', { className: 'cf-radio-swatch', style: { background: theme.swatch }, 'aria-hidden': true }),
+            ],
+          },
+          theme.value,
+        ),
+      ),
+    ],
+  })
 }
 
 function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage, brand, setBrand }) {
@@ -1255,15 +1498,7 @@ function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage
         className: 'cf-section',
         children: [
           jsx('div', { className: 'cf-section-head', children: jsx('span', { className: 'cf-section-title', children: 'Appearance' }) }),
-          jsx('div', {
-            className: 'cf-card',
-            children: jsx(ToggleRow, {
-              label: 'CoinFello colors',
-              description: "Use CoinFello's yellow for buttons and highlights instead of your Hermes accent color.",
-              checked: brand,
-              onChange: setBrand,
-            }),
-          }),
+          jsx('div', { className: 'cf-card', children: jsx(ThemePicker, { brand, setBrand }) }),
         ],
       }),
       jsxs('section', {
@@ -1464,6 +1699,7 @@ function Pane({ ctx }) {
     })
     setView({ kind: 'home' })
     setAllowanceMessage('')
+    closePortfolio()
     try {
       await ctx.rest('/disconnect', { method: 'POST', body: {} })
     } finally {

@@ -213,6 +213,12 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                                 "expected_email": {"type": "string"}}}
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
+                if self.state["portfolio_embed"]:
+                    # coinfello-web /embed/portfolio: scope advertised as an enum.
+                    for tool in tools:
+                        if tool["name"] == "create_embed_token":
+                            tool["inputSchema"] = {"type": "object", "properties": {
+                                "scope": {"type": "string", "enum": ["swap", "portfolio"]}}}
             if self.state["limit_mode"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}}
                           for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
@@ -285,6 +291,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             self._limit_tool(message_id, name, arguments)
             return
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
+                and not (name == "create_embed_token" and arguments.get("scope") == "portfolio")
                 and state["access_mode"]
                 and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
             state["refused_read_only"].append(name)
@@ -336,6 +343,15 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 {"success": True, "kind": "send", "transactionHash": "0xabc123"})))
             return
         if name == "create_embed_token" and state["actions"]:
+            if arguments.get("scope") == "portfolio":
+                if not state["portfolio_embed"]:
+                    self._json(200, _rpc_response(message_id, _tool_result(
+                        "scope: Invalid enum value. Expected 'swap'", error=True)))
+                    return
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    dict(EMBED_TOKEN, embed_token="cfemb_portfolio",
+                         embed_url="https://app.coinfello.test/embed/portfolio"))))
+                return
             self._json(200, _rpc_response(message_id, _tool_result(EMBED_TOKEN)))
             return
         if name == "expire_session":
@@ -461,6 +477,7 @@ def mock_mcp(monkeypatch):
         "signed_out_tokens": [],
         # Older servers have no send/swap/embed tools.
         "actions": False,
+        "portfolio_embed": False,
         "used_intents": [],
         "price_moved": False,
         "route_changed": False,

@@ -78,6 +78,13 @@ never in `config.yaml`.
 - **Home:** the automations wallet (address + copy), portfolio total and 24h
   change, and Send / Swap / Receive (Receive shows the funding QR). Below that,
   assets grouped by network and links to the full portfolio and strategies.
+  **Full portfolio** opens CoinFello's portfolio in a Hermes tab (main area)
+  when the server offers the read-only `/embed/portfolio` view
+  (`create_embed_token` with scope `portfolio`): it always shows this
+  plugin's account, with no browser, cookies or wallet extension involved.
+  Older servers, and Strategies for now, open in the browser with a note to
+  dismiss any wallet-extension prompt (the web app reconnects extension
+  wallets, which can sign in as a different account).
   A read-only session or a pending allowance change shows one notice that
   opens Settings.
 - **Settings:** the trading allowance (daily limit, what's left in the last

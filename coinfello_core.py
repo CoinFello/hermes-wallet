@@ -115,8 +115,16 @@ def server_tools(*, refresh: bool = False) -> frozenset:
             tool.get("name", ""): frozenset(((tool.get("inputSchema") or {}).get("properties") or {}).keys())
             for tool in tools
         }
+        enums = {
+            tool.get("name", ""): {
+                param: frozenset(str(v) for v in spec["enum"])
+                for param, spec in (((tool.get("inputSchema") or {}).get("properties") or {}).items())
+                if isinstance(spec, dict) and isinstance(spec.get("enum"), list)
+            }
+            for tool in tools
+        }
         _capabilities.update(
-            url=url, tools=names, descriptions=descriptions, params=params, at=time.monotonic()
+            url=url, tools=names, descriptions=descriptions, params=params, enums=enums, at=time.monotonic()
         )
     return _capabilities["tools"]
 
@@ -136,6 +144,17 @@ def accepts_param(tool: str, param: str) -> bool:
     except MCPError:
         return False
     return param in (_capabilities.get("params") or {}).get(tool, frozenset())
+
+
+def accepts_value(tool: str, param: str, value: str) -> bool:
+    """True when the server's schema lists ``value`` in ``param``'s enum
+    (e.g. create_embed_token's scope); a value an older server never
+    advertised is treated as unsupported."""
+    try:
+        server_tools()
+    except MCPError:
+        return False
+    return value in ((_capabilities.get("enums") or {}).get(tool) or {}).get(param, frozenset())
 
 
 def mask_email(value: str) -> str:
@@ -664,6 +683,7 @@ def portfolio() -> dict:
     model["can_trade"] = access["can_trade"]
     model["can_send"] = access["can_trade"] and supports("prepare_send") and supports("execute_intent")
     model["can_swap"] = access["can_trade"] and supports("create_embed_token")
+    model["can_view_portfolio"] = supports_portfolio_embed()
     return model
 
 
@@ -748,22 +768,39 @@ def explorer_url(transaction_hash: Any) -> str | None:
     return f"https://blockscan.com/tx/{transaction_hash}"
 
 
+EMBED_SCOPES = ("swap", "portfolio")
+
+
+def supports_portfolio_embed() -> bool:
+    """coinfello-web's read-only /embed/portfolio (scope 'portfolio')."""
+    return supports("create_embed_token") and accepts_value("create_embed_token", "scope", "portfolio")
+
+
 def embed_token(scope: str = "swap") -> dict:
     """A short-lived, scope-limited token for CoinFello's embedded views.
 
     Minted from the session server-side so the 30-day session token never
-    reaches the renderer; the embed gets this 15-minute, swap-only token.
+    reaches the renderer; the embed gets a 15-minute token for one scope.
+    Swap moves funds, so it needs trading access; the portfolio view only
+    reads, so a read-only session can open it.
     """
-    if not supports("create_embed_token"):
-        raise RuntimeError("Swapping from Hermes needs a CoinFello server update.")
-    result = trading_call("create_embed_token", {"scope": scope}, timeout=20.0)
+    if scope not in EMBED_SCOPES:
+        raise ValueError(f"unknown embed scope {scope!r}")
+    if scope == "portfolio":
+        if not supports_portfolio_embed():
+            raise RuntimeError("The in-app portfolio needs a CoinFello server update.")
+        result = call("create_embed_token", {"scope": scope}, timeout=20.0)
+    else:
+        if not supports("create_embed_token"):
+            raise RuntimeError("Swapping from Hermes needs a CoinFello server update.")
+        result = trading_call("create_embed_token", {"scope": scope}, timeout=20.0)
     if not isinstance(result, dict) or not result.get("embed_token"):
         raise RuntimeError(_text(result))
     return {
         "ok": True,
         "token": result["embed_token"],
         "expires_at": result.get("expires_at"),
-        "embed_url": result.get("embed_url") or app_url("/embed/swap"),
+        "embed_url": result.get("embed_url") or app_url(f"/embed/{scope}"),
     }
 
 
