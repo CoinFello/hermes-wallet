@@ -122,9 +122,17 @@ def server_tools(*, refresh: bool = False) -> frozenset:
         card_uris = {
             tool.get("name", ""): uri for tool in tools if (uri := _card_resource_uri(tool))
         }
+        enums = {
+            tool.get("name", ""): {
+                param: frozenset(str(v) for v in spec["enum"])
+                for param, spec in (((tool.get("inputSchema") or {}).get("properties") or {}).items())
+                if isinstance(spec, dict) and isinstance(spec.get("enum"), list)
+            }
+            for tool in tools
+        }
         _capabilities.update(
             url=url, tools=names, descriptions=descriptions, params=params,
-            properties=properties, required=required, card_uris=card_uris,
+            properties=properties, required=required, card_uris=card_uris, enums=enums,
             at=time.monotonic(),
         )
     return _capabilities["tools"]
@@ -199,6 +207,17 @@ def accepts_param(tool: str, param: str) -> bool:
     except MCPError:
         return False
     return param in (_capabilities.get("params") or {}).get(tool, frozenset())
+
+
+def accepts_value(tool: str, param: str, value: str) -> bool:
+    """True when the server's schema lists ``value`` in ``param``'s enum
+    (e.g. create_embed_token's scope); a value an older server never
+    advertised is treated as unsupported."""
+    try:
+        server_tools()
+    except MCPError:
+        return False
+    return value in ((_capabilities.get("enums") or {}).get(tool) or {}).get(param, frozenset())
 
 
 def mask_email(value: str) -> str:
@@ -775,6 +794,7 @@ def portfolio() -> dict:
     # trading access, and the server decides whether to mint (see embed_token).
     model["earn_supported"] = embeds_earn()
     model["earn_url"] = app_url("/earn")
+    model["can_view_portfolio"] = supports_portfolio_embed()
     return model
 
 
@@ -889,8 +909,10 @@ def explorer_url(transaction_hash: Any) -> str | None:
 
 
 #: The embedded views the pane hosts: scope -> its path on the app.
-EMBED_PATHS = {"swap": "/embed/swap", "earn": "/embed/earn"}
+EMBED_PATHS = {"swap": "/embed/swap", "earn": "/embed/earn", "portfolio": "/embed/portfolio"}
+EMBED_SCOPES = tuple(EMBED_PATHS)
 EARN_NEEDS_UPDATE = "Earn in Hermes needs a CoinFello server update."
+PORTFOLIO_NEEDS_UPDATE = "The in-app portfolio needs a CoinFello server update."
 
 
 def embeds_earn() -> bool:
@@ -903,27 +925,39 @@ def embeds_earn() -> bool:
     return values is None or "earn" in values
 
 
+def supports_portfolio_embed() -> bool:
+    """coinfello-web's read-only /embed/portfolio (scope 'portfolio')."""
+    return supports("create_embed_token") and accepts_value("create_embed_token", "scope", "portfolio")
+
+
 def embed_token(scope: str = "swap") -> dict:
     """A short-lived, scope-limited token for CoinFello's embedded views.
 
     Minted from the session server-side so the 30-day session token never
     reaches the renderer; the embed gets this 15-minute token, good only for
-    its own view (``swap`` or ``earn``).
+    its own view (``swap``, ``earn`` or ``portfolio``).
 
-    ``scope`` is sent only to a server whose schema declares it. A swap token
-    is refused up front on a session known to be read-only; an Earn token is
-    always asked of the server, which may mint one for browsing.
+    Swap moves funds: refused up front on a session known to be read-only,
+    and ``scope`` is sent only to a server whose schema declares it. Earn is
+    always asked of the server, which may mint one for browsing. The
+    portfolio view only reads, so it is minted with a plain call and only
+    from a server whose ``scope`` enum lists it.
     """
     if scope not in EMBED_PATHS:
         raise ValueError(f"unknown embed scope {scope!r}: one of {', '.join(EMBED_PATHS)}")
-    if not supports("create_embed_token"):
-        raise RuntimeError(
-            "Swapping from Hermes needs a CoinFello server update." if scope == "swap" else EARN_NEEDS_UPDATE
-        )
-    if scope != "swap" and not embeds_earn():
-        raise RuntimeError(EARN_NEEDS_UPDATE)
-    payload = {"scope": scope} if accepts_param("create_embed_token", "scope") else {}
-    result = trading_call("create_embed_token", payload, timeout=20.0, refuse_locally=scope == "swap")
+    if scope == "portfolio":
+        if not supports_portfolio_embed():
+            raise RuntimeError(PORTFOLIO_NEEDS_UPDATE)
+        result = call("create_embed_token", {"scope": scope}, timeout=20.0)
+    else:
+        if not supports("create_embed_token"):
+            raise RuntimeError(
+                "Swapping from Hermes needs a CoinFello server update." if scope == "swap" else EARN_NEEDS_UPDATE
+            )
+        if scope == "earn" and not embeds_earn():
+            raise RuntimeError(EARN_NEEDS_UPDATE)
+        payload = {"scope": scope} if accepts_param("create_embed_token", "scope") else {}
+        result = trading_call("create_embed_token", payload, timeout=20.0, refuse_locally=scope == "swap")
     if not isinstance(result, dict) or not result.get("embed_token"):
         raise RuntimeError(_text(result))
     return {

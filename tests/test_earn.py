@@ -294,8 +294,8 @@ def test_the_pane_mints_by_scope_with_swap_the_default(api, server):
     assert earned["ok"] is True and earned["token"] == "cfemb_earn"
     assert [args for name, args in _calls(server) if name == "create_embed_token"] == [
         {"scope": "swap"}, {"scope": "swap"}, {"scope": "earn"}]
-    bad = api.post(f"{BASE}/embed-token", json={"scope": "bridge"}).json()
-    assert bad["ok"] is False and "unknown embed scope" in bad["error"]
+    # An unknown scope is refused at the route (the body's scope is a Literal).
+    assert api.post(f"{BASE}/embed-token", json={"scope": "bridge"}).status_code == 422
 
 
 def test_the_pane_reads_a_read_only_refusal_in_plain_words(api, read_only):

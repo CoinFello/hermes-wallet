@@ -75,6 +75,35 @@ never in `config.yaml`.
 > Hermes release moves those helpers, the plugin falls back to a 0600 state
 > file inside the plugin directory.
 
+## The pane
+
+- **Header:** the CoinFello logo (wordmark follows your theme's text colour),
+  connection state, and a **Settings** gear.
+- **Home:** the automations wallet (address + copy), portfolio total and 24h
+  change, and Send / Swap / Receive (Receive shows the funding QR). Below that,
+  assets grouped by network and links to the full portfolio and strategies.
+  **Full portfolio** opens CoinFello's portfolio in a Hermes tab (main area)
+  when the server offers the read-only `/embed/portfolio` view
+  (`create_embed_token` with scope `portfolio`): it always shows this
+  plugin's account, with no browser, cookies or wallet extension involved.
+  Older servers, and Strategies for now, open in the browser with a note to
+  dismiss any wallet-extension prompt (the web app reconnects extension
+  wallets, which can sign in as a different account).
+  A read-only session or a pending allowance change shows one notice that
+  opens Settings.
+- **Settings:** the trading allowance (daily limit, what's left in the last
+  24 hours, change it without signing in again), the account and sign-out,
+  **Appearance** (CoinFello colors), and the server in use.
+
+The styling is one stylesheet scoped to `.cf`, injected at register and
+removed on dispose. Surfaces, text, borders, fonts and gain/loss colours come
+from the active Hermes theme (`--ui-*`, `--font-*`, `--ui-green`/`--ui-red`).
+Buttons and highlights use the theme's accent (`--dt-primary`, the colour of
+Hermes' own primary buttons) by default; **Settings > Appearance > CoinFello
+colors** switches them to CoinFello's yellow (saved per app with
+`ctx.storage`). CoinFello also contributes the logo, serif portfolio figures,
+round token icons and rounded cards.
+
 ## Sign-in flow
 
 **Browser-first** (CoinFello servers with `start_browser_sign_in`):
@@ -172,19 +201,32 @@ the tool returns the card's text everywhere. The plugin does not advertise
 the MCP Apps extension to the server, so card tools always answer with
 their full text plus `structuredContent`, on every surface.
 
-### Swap and Earn: CoinFello's own UI in the pane
+### Swap, Earn and Full portfolio: CoinFello's own UI in Hermes
 
 The pane's **Swap** and **Earn** buttons host coinfello-web's `/embed/swap`
-and `/embed/earn` (the app's real components) in a `SandboxedFrame`. One host
-serves both (`desktop/plugin.js`, the `embed-host` section): the frame loads
-`<app><path>?theme=dark|light`, says `coinfello:embed-ready`, and gets a
-15-minute token minted for its scope (`create_embed_token {scope}`, never the
-session token) with a per-mount nonce. A later token request must echo the
-nonce, and one within a minute of the last token stops instead of looping
-on a dead session. Results arrive as `coinfello:swap-result` /
-`coinfello:earn-result`; an Earn result says "nothing was sent" only for a
-cancel or failure with no transaction, and anything uncertain links the
-transaction and asks to check it.
+and `/embed/earn` (the app's real components) in a `SandboxedFrame`, and
+**Full portfolio** docks `/embed/portfolio` in a main-area tab. One host
+serves all three (`desktop/plugin.js`, the `embed-host` section): the frame
+loads `<app><path>?theme=dark|light`, says `coinfello:embed-ready`, and gets
+a 15-minute token minted for its scope (`POST /embed-token {scope}` ->
+`create_embed_token`, never the session token) with a per-mount nonce. A
+later token request must echo the nonce, and one within a minute of the
+last token stops instead of looping on a dead session. Messages from any
+window but the host's own frame are ignored; heights are clamped to
+240-1200px.
+
+- **Links**: the sandbox has no `allow-popups`, so an embed asks the pane
+  with `coinfello:open-url`; only allowlisted https block explorers open, at
+  most once a second. An embed that can do this says so in `embed-ready`
+  (`features: ['open-url']`), and its own View button is the only one.
+  For older embeds the pane adds one fallback View under the frame.
+- **Results** arrive as `coinfello:swap-result` / `coinfello:earn-result`
+  (the portfolio view has none). An Earn result says "nothing was sent" only
+  for a cancel or failure with no transaction, and anything uncertain asks
+  the person to check it.
+- **Scopes**: swap needs trading access; Earn is always asked of the server
+  (it may mint for browsing); portfolio is minted with a plain read call,
+  only when the server's `scope` enum lists `portfolio`.
 
 - **Earn preselects**: `&opportunity=<yield id>`, or `&token=<SYMBOL>&chain_id=<n>`,
   validated and percent-encoded by `coinfello_earn.frame_query`.
@@ -220,7 +262,7 @@ transaction and asks to check it.
 uv run --no-project --with pytest --with fastapi --with httpx --with 'segno>=1.6,<2' pytest tests/
 node --test tests/card_bridge.test.mjs   # the pane's card bridge (pytest runs it too when node is installed)
 node --test tests/amount.test.mjs        # the pane's amount normalizer (likewise)
-node --test tests/embed_host.test.mjs    # the pane's swap/Earn embed host (likewise)
+node --test tests/embed_host.test.mjs    # the pane's swap/Earn/portfolio embed host (likewise)
 ```
 
 The test suite runs a local mock of the MCP streamable-HTTP transport — no

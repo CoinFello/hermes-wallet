@@ -1,6 +1,6 @@
 // The pane's host for CoinFello's embedded views (desktop/plugin.js, between
-// the embed-host markers): swap and Earn share it, so both are run here with
-// fakes for the frame window, the clock and ctx.rest.
+// the embed-host markers): swap, Earn and the portfolio tab share it, so all
+// three are run here with fakes for the frame window, the clock and ctx.rest.
 //   node --test tests/embed_host.test.mjs
 // (tests/test_earn.py runs this from pytest when node is installed.)
 
@@ -14,8 +14,9 @@ const end = source.indexOf('/* embed-host:end */')
 assert.ok(start > 0 && end > start, 'embed-host markers missing from desktop/plugin.js')
 
 const EXPORTS = [
-  'EMBEDS', 'EMBED_HEIGHT_MIN', 'EMBED_HEIGHT_MAX', 'EMBED_REFRESH_GAP_MS', 'EMBED_CHECK_TEXT',
-  'embedFrameSrc', 'clampEmbedHeight', 'createEmbedHost', 'swapOutcome', 'earnOutcome',
+  'EMBEDS', 'EMBED_HEIGHT_MIN', 'EMBED_HEIGHT_MAX', 'EMBED_REFRESH_GAP_MS', 'EMBED_OPEN_GAP_MS', 'EMBED_CHECK_TEXT',
+  'SWAP_FALLBACK_VIEW_TEXT', 'embedFrameSrc', 'embedTokenRequest', 'clampEmbedHeight', 'createEmbedHost',
+  'allowedEmbedLink', 'swapOutcome', 'earnOutcome',
 ]
 const host = new Function(`${source.slice(start, end)}\nreturn { ${EXPORTS.join(', ')} }`)()
 
@@ -27,6 +28,7 @@ function harness({ kind = 'swap', mint } = {}) {
   const errors = []
   const sizes = []
   const results = []
+  const opened = []
   const mints = []
   let clock = 1_000_000
   const instance = host.createEmbedHost({
@@ -40,11 +42,12 @@ function harness({ kind = 'swap', mint } = {}) {
     },
     now: () => clock,
     onError: (text, minted) => errors.push([text, minted]),
+    openExternal: (url) => opened.push(url),
     onResize: (height) => sizes.push(height),
-    onResult: (message) => results.push(message),
+    onResult: (message, embedOpensLinks) => results.push(embedOpensLinks ? { ...message, opensLinks: true } : message),
   })
   const send = (data, source = frame) => instance.handle({ source, data })
-  return { instance, frame, posted, errors, sizes, results, mints, send, tick: (ms) => { clock += ms } }
+  return { instance, frame, posted, errors, sizes, results, opened, mints, send, tick: (ms) => { clock += ms } }
 }
 
 // -- the frame URL -------------------------------------------------------------------
@@ -71,9 +74,24 @@ test('swap keeps its path, result message and wording', () => {
   assert.equal(host.EMBEDS.earn.scope, 'earn')
 })
 
+test('the portfolio tab keeps its path, scope and wording', () => {
+  const portfolio = host.EMBEDS.portfolio
+  assert.equal(portfolio.path, '/embed/portfolio')
+  assert.equal(portfolio.scope, 'portfolio')
+  assert.equal(portfolio.mintError, 'Could not open Portfolio')
+  assert.equal(portfolio.sessionEnded, 'Your CoinFello session ended. Sign in again, then reopen Portfolio.')
+  assert.equal(portfolio.reloaded, 'The Portfolio view reloaded. Reopen it to continue.')
+})
+
+test('each embed mints a token for its own scope', () => {
+  for (const kind of ['swap', 'earn', 'portfolio']) {
+    assert.deepEqual(host.embedTokenRequest(host.EMBEDS[kind]), { method: 'POST', body: { scope: kind } })
+  }
+})
+
 // -- the handshake -----------------------------------------------------------------------
 
-for (const kind of ['swap', 'earn']) {
+for (const kind of ['swap', 'earn', 'portfolio']) {
   test(`${kind}: the first ready gets a token with the nonce, sent to the frame that asked`, async () => {
     const h = harness({ kind })
     assert.equal(await h.send({ type: 'coinfello:embed-ready', version: 1 }), true)
@@ -126,14 +144,16 @@ test('an expired token is replaced for the same document', async () => {
   assert.equal(h.posted[1][1].token, 'cfemb_2')
 })
 
-test('a dead session cannot loop: a second request within a minute stops', async () => {
-  const h = harness({ kind: 'earn' })
-  await h.send({ type: 'coinfello:embed-ready' })
-  h.tick(host.EMBED_REFRESH_GAP_MS - 1)
-  await h.send({ type: 'coinfello:embed-ready', nonce: 'nonce-1' })
-  assert.equal(h.mints.length, 1)
-  assert.deepEqual(h.errors, [[host.EMBEDS.earn.sessionEnded, null]])
-})
+for (const kind of ['earn', 'portfolio']) {
+  test(`${kind}: a dead session cannot loop: a second request within a minute stops`, async () => {
+    const h = harness({ kind })
+    await h.send({ type: 'coinfello:embed-ready' })
+    h.tick(host.EMBED_REFRESH_GAP_MS - 1)
+    await h.send({ type: 'coinfello:embed-ready', nonce: 'nonce-1' })
+    assert.equal(h.mints.length, 1)
+    assert.deepEqual(h.errors, [[host.EMBEDS[kind].sessionEnded, null]])
+  })
+}
 
 test('a document that never saw the nonce gets no token', async () => {
   const h = harness()
@@ -160,6 +180,47 @@ test('each embed takes only its own result message', async () => {
   await earn.send({ type: 'coinfello:swap-result', status: 'success' })
   await earn.send({ type: 'coinfello:earn-result', status: 'failed' })
   assert.deepEqual(earn.results, [{ type: 'coinfello:earn-result', status: 'failed' }])
+  const portfolio = harness({ kind: 'portfolio' })
+  await portfolio.send({ type: 'coinfello:swap-result', status: 'success' })
+  await portfolio.send({ type: 'coinfello:earn-result', status: 'success' })
+  await portfolio.send({ type: '' })
+  assert.deepEqual(portfolio.results, [])
+})
+
+// -- links the embed asks us to open (its sandbox has no allow-popups) ---------------
+
+test('only allowlisted https explorers open, at most once a second', async () => {
+  const h = harness()
+  const tx = `https://basescan.org/tx/${HASH}`
+  await h.send({ type: 'coinfello:open-url', url: tx })
+  await h.send({ type: 'coinfello:open-url', url: `https://etherscan.io/tx/${HASH}` }) // too soon
+  h.tick(host.EMBED_OPEN_GAP_MS)
+  for (const url of ['http://basescan.org/tx/1', 'https://evil.test/tx/1', 'https://basescan.org.evil.test/',
+    'javascript:alert(1)', 42, null]) {
+    await h.send({ type: 'coinfello:open-url', url })
+  }
+  await h.send({ type: 'coinfello:open-url', url: 'https://scan.li.fi/tx/1' })
+  assert.deepEqual(h.opened, [tx, 'https://scan.li.fi/tx/1'])
+  assert.equal(host.allowedEmbedLink('https://blockscan.com/tx/1'), 'https://blockscan.com/tx/1')
+})
+
+test('links from any other window never open', async () => {
+  const h = harness({ kind: 'portfolio' })
+  await h.send({ type: 'coinfello:open-url', url: 'https://blockscan.com/tx/1' }, { name: 'stranger' })
+  assert.deepEqual(h.opened, [])
+})
+
+test("the result says whether the embed opens its own links ('open-url')", async () => {
+  const h = harness()
+  await h.send({ type: 'coinfello:embed-ready', version: 1 })
+  await h.send({ type: 'coinfello:swap-result', status: 'success' })
+  h.tick(host.EMBED_REFRESH_GAP_MS * 20)
+  await h.send({ type: 'coinfello:embed-ready', version: 1, features: ['open-url'], nonce: 'nonce-1' })
+  await h.send({ type: 'coinfello:swap-result', status: 'success' })
+  assert.deepEqual(h.results, [
+    { type: 'coinfello:swap-result', status: 'success' },
+    { type: 'coinfello:swap-result', status: 'success', opensLinks: true },
+  ])
 })
 
 test('a message that is not an object is ignored', async () => {
@@ -171,15 +232,33 @@ test('a message that is not an object is ignored', async () => {
 
 // -- outcomes ---------------------------------------------------------------------------
 
-test('swap still shows only a success', () => {
-  assert.equal(host.swapOutcome({ status: 'success' }).title, 'Swap submitted.')
-  for (const status of ['failed', 'unknown', 'cancelled']) assert.equal(host.swapOutcome({ status }), null)
+test('swap adds nothing when the widget opens its own View', () => {
+  assert.equal(host.swapOutcome({ status: 'success', transactionHash: HASH }, true), null)
+})
+
+test('swap adds one fallback View, only for an older embed and a real hash', () => {
+  assert.deepEqual(host.swapOutcome({ status: 'success', transactionHash: HASH }, false), {
+    tone: 'muted', title: '', detail: host.SWAP_FALLBACK_VIEW_TEXT, explorerUrl: `https://blockscan.com/tx/${HASH}`,
+  })
+  assert.equal(host.swapOutcome({ status: 'success' }, false), null)
+  assert.equal(host.swapOutcome({ status: 'success', transactionHash: '0x123' }, false), null)
+  for (const status of ['failed', 'unknown', 'cancelled']) {
+    assert.equal(host.swapOutcome({ status, transactionHash: HASH }, false), null)
+  }
 })
 
 test('an earn success links its transaction', () => {
   assert.deepEqual(host.earnOutcome({ status: 'success', transactionHash: HASH }),
     { tone: 'good', title: 'Deposit submitted.', detail: '', explorerUrl: `https://blockscan.com/tx/${HASH}` })
   assert.equal(host.earnOutcome({ status: 'success' }).explorerUrl, '')
+})
+
+test('an earn embed that opens its own links gets no second View button', () => {
+  assert.equal(host.earnOutcome({ status: 'success', transactionHash: HASH }, true), null)
+  const unknown = host.earnOutcome({ status: 'unknown', transactionHash: HASH }, true)
+  assert.match(unknown.title, /Check status/)
+  assert.equal(unknown.explorerUrl, '')
+  assert.equal(host.earnOutcome({ status: 'failed', error: 'No gas.' }, true).detail, 'No gas. Nothing was sent.')
 })
 
 test('"nothing was sent" only for a cancel or failure with no transaction', () => {

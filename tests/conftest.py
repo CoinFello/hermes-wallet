@@ -342,11 +342,17 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                                 "expected_email": {"type": "string"}}}
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
-                if self.state["embed_scopes"] is not None:
-                    # The Earn embed's server: create_embed_token takes a scope.
+                scopes = self.state["embed_scopes"]
+                if self.state["portfolio_embed"]:
+                    # coinfello-web /embed/portfolio: scope advertised as an enum.
+                    scopes = ("swap",) if scopes is None else scopes
+                    scopes = tuple(scopes) + (("portfolio",) if scopes and "portfolio" not in scopes else ())
+                if scopes is not None:
+                    # create_embed_token takes a scope: the Earn and/or the
+                    # portfolio embed's server. () = a scope with no enum.
                     scope = {"type": "string"}
-                    if self.state["embed_scopes"]:
-                        scope["enum"] = list(self.state["embed_scopes"])
+                    if scopes:
+                        scope["enum"] = list(scopes)
                     for tool in tools:
                         if tool["name"] == "create_embed_token":
                             tool["inputSchema"] = {"type": "object", "properties": {
@@ -432,6 +438,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         browse_only = (name == "create_embed_token" and arguments.get("scope") == "earn"
                        and state["earn_read_only_mint"])
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
+                and not (name == "create_embed_token" and arguments.get("scope") == "portfolio")
                 and state["access_mode"] and not browse_only
                 and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
             state["refused_read_only"].append(name)
@@ -494,6 +501,15 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 {"success": True, "kind": "send", "transactionHash": "0xabc123"})))
             return
         if name == "create_embed_token" and state["actions"]:
+            if arguments.get("scope") == "portfolio":
+                if not state["portfolio_embed"]:
+                    self._json(200, _rpc_response(message_id, _tool_result(
+                        "scope: Invalid enum value. Expected 'swap'", error=True)))
+                    return
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    dict(EMBED_TOKEN, embed_token="cfemb_portfolio",
+                         embed_url="https://app.coinfello.test/embed/portfolio"))))
+                return
             minted = dict(EMBED_TOKEN)
             if arguments.get("scope") == "earn":
                 minted.update(embed_token="cfemb_earn", embed_url="https://app.coinfello.test/embed/earn")
@@ -622,6 +638,7 @@ def mock_mcp(monkeypatch):
         "signed_out_tokens": [],
         # Older servers have no send/swap/embed tools.
         "actions": False,
+        "portfolio_embed": False,
         "used_intents": [],
         "price_moved": False,
         "route_changed": False,

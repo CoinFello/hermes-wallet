@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 # Loaded standalone by the dashboard importer (spec_from_file_location), so
 # package-relative imports are unavailable: put the plugin directory on the
@@ -127,10 +127,10 @@ def intent_execute(body: IntentBody):
     return _safe(lambda: core.execute_intent(body.intent_id))
 
 
-class EmbedBody(BaseModel):
-    """``scope`` is the embedded view: ``swap`` (the default) or ``earn``."""
+class EmbedTokenBody(BaseModel):
+    """Which embedded view the token is for; the pane's swap view sends none."""
 
-    scope: Optional[str] = None
+    scope: Literal["swap", "earn", "portfolio"] = "swap"
 
 
 EARN_READ_ONLY = (
@@ -140,8 +140,8 @@ EARN_READ_ONLY = (
 
 
 @router.post("/embed-token")
-def embed_token(body: Optional[EmbedBody] = None):
-    scope = (body.scope if body else None) or "swap"
+def embed_token(body: Optional[EmbedTokenBody] = None):
+    scope = body.scope if body else "swap"
     if scope != "earn":
         return _safe(lambda: core.embed_token(scope))
 
