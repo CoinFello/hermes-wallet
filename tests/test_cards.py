@@ -312,6 +312,31 @@ def test_execute_runs_once_for_an_intent_this_card_owns(server):
     with pytest.raises(cards.CardRefused):
         cards.card_call(card_id, "execute_intent", {"intent_id": INTENT})
     assert trades.recall_intent(INTENT) is None
+    assert cards.get_card(card_id)["intents"] == {}
+
+
+def test_execute_works_from_the_pane_process(server):
+    # Hermes loads plugin_api.py as its own module (and tools may run in a
+    # turn-isolation child): the pane's side sees the card record on disk,
+    # not the tools' in-memory intent cache.
+    _prepare_bridge()
+    card_id = _show("quote", {"intent_id": INTENT})["card_id"]
+    with trades._intents_lock:
+        trades._intents.clear()
+    cards.reset_for_tests()
+    preview = cards.card_call(card_id, "execute_intent", {"intent_id": INTENT})["confirm"]
+    assert preview["description"].startswith("Bridge 0.004186 ETH")
+    assert cards.card_execute(card_id, preview["confirm_id"])["tool"] == "execute_intent"
+
+
+def test_an_expired_intent_cannot_be_confirmed(server):
+    _prepare_bridge()
+    card_id = _show("quote", {"intent_id": INTENT})["card_id"]
+    record = cards.get_card(card_id)
+    record["intents"][INTENT]["expires_at"] = time.time() - 1
+    cards.save_card(record)
+    with pytest.raises(cards.CardRefused, match="expired"):
+        cards.card_call(card_id, "execute_intent", {"intent_id": INTENT})
 
 
 def test_execute_refuses_an_intent_the_card_did_not_produce(server):
@@ -334,7 +359,7 @@ def test_a_fresh_quote_from_the_card_becomes_the_cards_intent(server):
     card_id = _show("quote", {"intent_id": "77777777-7777-7777-7777-777777777777"})["card_id"]
     cards.card_call(card_id, "prepare_swap", {"from_chain_id": 1, "from_token": "ETH",
                                               "to_chain_id": 137, "to_token": "POL", "amount": "0.004186"})
-    assert INTENT in cards.get_card(card_id)["intent_ids"]
+    assert cards.get_card(card_id)["intents"][INTENT]["summary"]["bridges"] == ["layerswap"]
     preview = cards.card_call(card_id, "execute_intent", {"intent_id": INTENT})["confirm"]
     assert "layerswap" in preview["description"]
 

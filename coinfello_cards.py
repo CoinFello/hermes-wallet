@@ -367,9 +367,32 @@ def _payload(result: dict) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _card_intents(result: dict) -> list[str]:
+def _card_intent(result: dict) -> str:
     intent = _structured(result).get("intentId")
-    return [intent] if isinstance(intent, str) and intent else []
+    return intent if isinstance(intent, str) else ""
+
+
+# The intents a card owns live IN its record, with the server's summary:
+# the dashboard API (which serves the pane) is a separate module from the
+# agent tools, and with turn isolation a separate process, so the trades
+# cache the tools fill is not visible to it.
+
+def _own_intent(record: dict, intent: str, summary: dict | None, seconds: float) -> None:
+    """Record ``intent`` as this card's. ``summary`` None: the card names it,
+    but Hermes holds no server summary for it, so it can never be confirmed."""
+    with _lock:
+        record.setdefault("intents", {})[intent] = {
+            "summary": summary,
+            "expires_at": time.time() + max(0.0, float(seconds)),
+        }
+
+
+def _own_card_intent(record: dict, result: dict) -> None:
+    """The intent a quote/money card shows: ours only if this Hermes prepared
+    it (coinfello_prepare_*, which cached the server's summary)."""
+    intent = _card_intent(result)
+    if intent:
+        _own_intent(record, intent, trades.recall_intent(intent), trades.intent_seconds_left(intent))
 
 
 # -- showing a card ---------------------------------------------------------------
@@ -428,9 +451,11 @@ def show_card(card: Any, arguments: Any = None, *, session_id: str = "", surface
         "args": args,
         "result": result,
         "session_id": str(session_id or ""),
-        "intent_ids": _card_intents(result),
+        "intents": {},
         "created_at": time.time(),
     })
+    _own_card_intent(record, result)
+    save_card(record)
     _prune()
     _announce(record["id"])
     return {
@@ -567,10 +592,11 @@ def _own_prepared(record: dict, result: dict) -> None:
     if not isinstance(intent, str) or not intent:
         return
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    trades.remember_intent(intent, summary, payload.get("expiresInSeconds"))
-    with _lock:
-        if intent not in record["intent_ids"]:
-            record["intent_ids"].append(intent)
+    try:
+        seconds = float(payload.get("expiresInSeconds")) - 10.0
+    except (TypeError, ValueError):
+        seconds = float(trades.INTENT_TTL_FALLBACK_SECONDS)
+    _own_intent(record, intent, summary, min(seconds, float(trades.INTENT_TTL_FALLBACK_SECONDS)))
 
 
 def card_call(card_id: str, tool: str, arguments: Any = None) -> dict:
@@ -598,9 +624,7 @@ def card_call(card_id: str, tool: str, arguments: Any = None) -> dict:
     if kind is not None and tool == kind.tool and not result.get("isError"):
         record["result"] = result
         record["args"] = args
-        for intent in _card_intents(result):
-            if intent not in record["intent_ids"]:
-                record["intent_ids"].append(intent)
+        _own_card_intent(record, result)
     save_card(record)
     return {"ok": True, "result": result}
 
@@ -635,19 +659,27 @@ def _automation(record: dict, trigger_id: str) -> dict | None:
     return None
 
 
+def _owned_intent(record: dict, intent: str) -> dict:
+    """This card's live, confirmable intent, or CardRefused."""
+    owned = (record.get("intents") or {}).get(intent)
+    if not intent or owned is None:
+        raise CardRefused("This card did not prepare that trade. Nothing was sent.")
+    if not isinstance(owned.get("summary"), dict):
+        raise CardRefused("That quote was not prepared in Hermes. Get a fresh one on the card; nothing was sent.")
+    if float(owned.get("expires_at") or 0) <= time.time():
+        raise CardRefused("That quote expired. Get a fresh one on the card; nothing was sent.")
+    return owned
+
+
 def _confirmation(record: dict, tool: str, arguments: dict) -> dict:
     if tool == "execute_intent":
         intent = str(arguments.get("intent_id") or "").strip()
-        if intent not in record["intent_ids"]:
-            raise CardRefused("This card did not prepare that trade. Nothing was sent.")
-        summary = trades.recall_intent(intent)
-        if summary is None:
-            raise CardRefused("That quote expired or was not prepared in Hermes. Get a fresh one; nothing was sent.")
+        owned = _owned_intent(record, intent)
         confirm = {
             "title": "Confirm on-chain",
-            "description": describe_summary(summary),
-            "rows": summary_rows(summary),
-            "expires_in_seconds": trades.intent_seconds_left(intent),
+            "description": describe_summary(owned["summary"]),
+            "rows": summary_rows(owned["summary"]),
+            "expires_in_seconds": max(1, int(owned["expires_at"] - time.time())),
             "arguments": {"intent_id": intent},
         }
     else:  # cancel_automation
@@ -690,13 +722,12 @@ def card_execute(card_id: str, confirm_id: str) -> dict:
         raise CardRefused(f"{tool} is not available from this card in Hermes.")
     if tool == "execute_intent":
         intent = arguments["intent_id"]
-        if intent not in record["intent_ids"] or trades.recall_intent(intent) is None:
-            raise CardRefused("That quote expired. Nothing was sent.")
+        _owned_intent(record, intent)
         # Single use, like coinfello_execute: gone before the call goes out.
-        trades.forget_intent(intent)
         with _lock:
-            record["intent_ids"].remove(intent)
+            record["intents"].pop(intent, None)
         save_card(record)
+        trades.forget_intent(intent)
         result = core.trading_call_result("execute_intent", arguments, timeout=180.0)
     else:
         if _automation(record, arguments["trigger_id"]) is None:

@@ -155,8 +155,9 @@ What a card may call, checked in the pane and again in Python:
 | automations | `pause_automation` | `cancel_automation` |
 | error | its Retry tool, if on the server's retryable list (reads and quotes) | |
 
-`execute_intent` runs only for an intent this card produced and this Hermes
-process prepared (the server's summary is what the confirmation shows), once.
+`execute_intent` runs only for an intent this card produced and Hermes
+prepared (the server's summary, kept with the card record, is what the
+confirmation shows), once and before it expires.
 `cancel_automation` runs only for an automation the card listed. Sign-out,
 Fello, sign-in, session renewal, embed tokens and daily-limit changes are
 never relayed, nor is anything not in the table. Credential-like keys are
