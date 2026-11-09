@@ -58,6 +58,8 @@ def _wrap(handler: Handler) -> Handler:
             return tool_result(handler(args or {}))
         except core.NotSignedIn as exc:
             return tool_error(f"Not signed in to CoinFello. {exc}")
+        except core.NeedsTradingAccess as exc:
+            return tool_error(str(exc))
         except core.ToolError as exc:
             return tool_error(f"CoinFello: {exc}")
         except core.MCPError as exc:
@@ -171,9 +173,12 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         "coinfello_status",
         _schema(
             "coinfello_status",
-            "Show the CoinFello connection state: whether a session is signed in, "
-            "the automation wallet address (the address to send funds to, on any "
-            "EVM network), when the session expires, and the MCP endpoint.",
+            "Show the CoinFello connection state: whether a session is signed in "
+            "and as whom, its access (read_only, or trade with daily_limit_usd, "
+            "spent_today_usd and remaining_today_usd), the automation wallet "
+            "address (the address to send funds to, on any EVM network), and "
+            "when the session expires. Check access before preparing a trade: "
+            "a read_only session is refused, and `next` says how to upgrade.",
             {},
         ),
         _status,
@@ -182,15 +187,16 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         "coinfello_connect",
         _schema(
             "coinfello_connect",
-            "Start signing in to CoinFello. On current servers this is a browser "
-            "sign-in: it returns approval_url and user_code. Tell the human that "
-            "approving lets Fello act on their CoinFello automation wallet (the "
-            "same permission as the Automation Wallet in the app, revocable "
-            "there), give them approval_url to open, ask them to check the code "
-            "on the page matches user_code, then call coinfello_poll_approval "
-            "every 5-10 seconds. On older servers without browser sign-in, pass "
-            "email: a login code is emailed instead, finished with "
-            "coinfello_verify.",
+            "Start signing in to CoinFello, or upgrade a read-only session so it "
+            "can trade. Returns user_message: SEND IT TO THE HUMAN EXACTLY AS "
+            "WRITTEN. It lists the approval page's steps in the order the page "
+            "asks for them (open the link in their own browser, sign in to "
+            "CoinFello with email or phone, then type the code, then choose read "
+            "only or a daily limit, then approve); a reordered paraphrase "
+            "confuses people. Do not open approval_url yourself or in an in-app "
+            "preview. Then call coinfello_poll_approval every 5-10 seconds. On "
+            "older servers without browser sign-in, pass email: a login code is "
+            "emailed instead, finished with coinfello_verify.",
             {"email": {**_STRING, "description": "Only needed on servers without browser sign-in"}},
         ),
         _connect,
@@ -215,8 +221,10 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "coinfello_poll_approval",
             "Finishes a sign-in that is waiting on the human's browser approval. "
             "Call every 5-10 seconds after they have the approval link; returns "
-            "status pending until they approve, then completes the sign-in. The "
-            "session renews itself while in use, so this is a one-time step.",
+            "status pending until they approve, then completes the sign-in. "
+            "When signed in, send its user_message to the human: it names the "
+            "account and says whether the session can trade. The session renews "
+            "itself while in use.",
             {"approval_id": {**_STRING, "description": "approval_id from coinfello_connect (default: the pending one)"}},
         ),
         _poll_approval,

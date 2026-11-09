@@ -155,7 +155,7 @@ def prepare_swap(args: dict) -> dict:
         payload["to_chain_id"] = int(args["to_chain_id"])
     if args.get("slippage") is not None:
         payload["slippage"] = float(args["slippage"])
-    return _prepared(core.call("prepare_swap", payload))
+    return _prepared(core.trading_call("prepare_swap", payload))
 
 
 def prepare_send(args: dict) -> dict:

@@ -178,7 +178,7 @@ function Portfolio({ ctx, onSend, onSwap }) {
             size: 'sm',
             className: 'flex-1',
             disabled: !data.can_send,
-            title: data.can_send ? undefined : 'Sending from Hermes needs a CoinFello update',
+            title: data.can_send ? undefined : data.can_trade === false ? 'Read-only session: enable trading first' : 'Sending from Hermes needs a CoinFello update',
             onClick: () => onSend(data),
             children: jsxs(Fragment, { children: [jsx(Codicon, { name: 'arrow-up', size: 12 }), 'Send'] }),
           }),
@@ -187,7 +187,7 @@ function Portfolio({ ctx, onSend, onSwap }) {
             variant: 'secondary',
             className: 'flex-1',
             disabled: !data.can_swap,
-            title: data.can_swap ? undefined : 'Swapping from Hermes needs a CoinFello update',
+            title: data.can_swap ? undefined : data.can_trade === false ? 'Read-only session: enable trading first' : 'Swapping from Hermes needs a CoinFello update',
             onClick: onSwap,
             children: jsxs(Fragment, { children: [jsx(Codicon, { name: 'arrow-swap', size: 12 }), 'Swap'] }),
           }),
@@ -582,11 +582,14 @@ function SwapEmbed({ ctx, appUrl, onClose }) {
 
 // -- signed-out: browser-first sign-in ------------------------------------------
 
-function BrowserSignIn({ ctx, status, refresh }) {
-  const [busy, setBusy] = useState(false)
+// The approval page's steps, from the backend (coinfello_core.sign_in_steps),
+// so the pane and the agent always describe the same order: open the page,
+// sign in to CoinFello, type the code, choose access, approve.
+function PendingSignIn({ ctx, status, refresh, upgrade }) {
   const [error, setError] = useState('')
-  const pendingCode = status.pending_user_code
-  const pendingUrl = status.pending_approval_url
+  const code = status.pending_user_code
+  const url = status.pending_approval_url
+  const steps = status.sign_in_steps || []
 
   // While a browser approval is outstanding, poll for the finished sign-in.
   useEffect(() => {
@@ -607,6 +610,106 @@ function BrowserSignIn({ ctx, status, refresh }) {
     return () => clearInterval(timer)
   }, [status.pending_approval_id, ctx, refresh])
 
+  const cancel = async () => {
+    await ctx.rest('/cancel-sign-in', { method: 'POST', body: {} })
+    refresh()
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-2 rounded-md border border-(--ui-stroke-secondary) p-2',
+    children: [
+      jsx('div', { className: 'text-xs font-medium', children: upgrade ? 'Enable trading' : 'Finish signing in' }),
+      jsxs('ol', {
+        className: cn('flex list-decimal flex-col gap-1 pl-4 text-xs', muted),
+        children: [
+          // Step 1 is "open the page": a button here instead of the URL.
+          jsx('li', {
+            children: jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(url), children: 'Open the sign-in page' }),
+          }),
+          ...steps.slice(1).map((step, index) =>
+            jsx('li', { children: step.startsWith('When the page asks for your agent') ? 'Then type this code when the page asks for it:' : step }, index),
+          ),
+        ],
+      }),
+      jsx('div', { className: 'rounded-md border border-(--ui-stroke-secondary) py-2 text-center font-mono text-lg tracking-widest select-all', children: code }),
+      jsx('div', { className: cn('text-[0.6875rem]', muted), children: 'Only approve if the page says the request came from you, just now.' }),
+      jsxs('div', {
+        className: row,
+        children: [
+          jsx('span', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for approval…' }),
+          jsx(Button, { size: 'sm', variant: 'ghost', onClick: cancel, children: 'Cancel' }),
+        ],
+      }),
+      error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
+    ],
+  })
+}
+
+// Read-only vs trading with a daily limit, and the way
+// from one to the other.
+function AccessBadge({ ctx, status, refresh }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  if (!status.access || status.access === 'unknown') return null
+
+  const enableTrading = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await ctx.rest('/connect', { method: 'POST', body: {} })
+      if (!result || result.ok === false) setError(errorOf(result, 'Could not start sign-in'))
+      else {
+        ctx.os.openExternal(result.approval_url)
+        refresh()
+      }
+    } catch (exc) {
+      setError(String(exc))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (status.access === 'trade') {
+    const left = status.remaining_today_usd
+    return jsxs('div', {
+      className: cn(row, 'text-[0.6875rem]', muted),
+      children: [
+        jsxs('span', {
+          className: 'flex items-center gap-1.5',
+          children: [jsx(StatusDot, { tone: 'good' }), `Trading · up to $${status.daily_limit_usd}/day`],
+        }),
+        left != null ? jsx('span', { children: `$${Number(left).toFixed(2)} left today` }) : null,
+      ],
+    })
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-1.5 rounded-md border border-(--ui-stroke-secondary) p-2',
+    children: [
+      jsxs('div', {
+        className: row,
+        children: [
+          jsxs('span', {
+            className: 'flex items-center gap-1.5 text-xs font-medium',
+            children: [jsx(StatusDot, { tone: 'warn' }), 'Read-only'],
+          }),
+          jsx(Button, { size: 'sm', loading: busy, onClick: enableTrading, children: 'Enable trading' }),
+        ],
+      }),
+      jsx('div', {
+        className: cn('text-[0.6875rem]', muted),
+        children: 'Balances and quotes work. To send or swap, sign in again and pick a daily limit.',
+      }),
+      error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
+    ],
+  })
+}
+
+function BrowserSignIn({ ctx, status, refresh }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const pendingCode = status.pending_user_code
+
   const start = async () => {
     setBusy(true)
     setError('')
@@ -624,30 +727,7 @@ function BrowserSignIn({ ctx, status, refresh }) {
     }
   }
 
-  const cancel = async () => {
-    await ctx.rest('/cancel-sign-in', { method: 'POST', body: {} })
-    refresh()
-  }
-
-  if (pendingCode) {
-    return jsxs('div', {
-      className: 'flex flex-col gap-2',
-      children: [
-        jsx('div', { className: cn('text-xs', muted), children: 'Sign in on the page that opened, then type this code there:' }),
-        jsx('div', { className: 'rounded-md border border-(--ui-stroke-secondary) py-2 text-center font-mono text-lg tracking-widest select-all', children: pendingCode }),
-        jsx('div', { className: cn('text-[0.6875rem]', muted), children: 'Only approve if the page says the request came from you, just now.' }),
-        jsx('div', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for approval…' }),
-        jsxs('div', {
-          className: 'flex gap-2',
-          children: [
-            jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(pendingUrl), children: 'Reopen page' }),
-            jsx(Button, { size: 'sm', variant: 'ghost', onClick: cancel, children: 'Cancel' }),
-          ],
-        }),
-        error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
-      ],
-    })
-  }
+  if (pendingCode) return jsx(PendingSignIn, { ctx, status, refresh, upgrade: false })
 
   return jsxs('div', {
     className: 'flex flex-col gap-2',
@@ -790,6 +870,9 @@ function Pane({ ctx }) {
   } else if (connected) {
     body = jsxs(Fragment, {
       children: [
+        data.pending_approval_id
+          ? jsx(PendingSignIn, { ctx, status: data, refresh, upgrade: !!data.pending_upgrade })
+          : jsx(AccessBadge, { ctx, status: data, refresh }),
         jsx(WalletCard, { ctx }),
         jsx(Portfolio, {
           ctx,

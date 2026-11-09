@@ -32,7 +32,8 @@ def test_connect_is_browser_first_on_servers_that_support_it(browser_server):
     result = core.connect()  # no email needed
     assert result["status"] == "approval_required"
     assert result["user_code"] == "WDJB-MJHT"
-    assert result["approval_url"].endswith("user_code=WDJB-MJHT")
+    assert result["approval_url"].endswith("/authorize")
+    assert "WDJB-MJHT" not in result["approval_url"]  # the code is typed, never linked
     names = [name for name, _ in browser_server.mock_state["tool_calls"]]
     assert names == ["start_browser_sign_in"]
     assert "privy_send_login_code" not in names
@@ -57,7 +58,7 @@ def test_pending_browser_sign_in_survives_a_pane_reload(browser_server):
     status = core.status()
     assert status["connected"] is False
     assert status["pending_user_code"] == "WDJB-MJHT"
-    assert status["pending_approval_url"].endswith("WDJB-MJHT")
+    assert status["pending_approval_url"].endswith("/authorize")
     assert status["sign_in_mode"] == "browser"
 
 

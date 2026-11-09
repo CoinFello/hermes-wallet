@@ -55,7 +55,8 @@ BALANCES_TEXT = json.dumps(BALANCES)
 WHOAMI = {"wallet_address": "0xWALLET", "expires_at": "2026-11-17T00:00:00Z"}
 
 BROWSER_SIGN_IN = {
-    "approval_url": "https://example.test/authorize?user_code=WDJB-MJHT",
+    # Production: the link never carries the code.
+    "approval_url": "https://example.test/authorize",
     "user_code": "WDJB-MJHT",
     "approval_id": "22222222-2222-2222-2222-222222222222",
     "expires_in_seconds": 600,
@@ -114,6 +115,13 @@ EMBED_TOKEN = {
     "expires_at": "2099-01-01T00:15:00Z",
     "embed_url": "https://app.coinfello.test/embed/swap",
 }
+
+
+def _access_for(authorization, state):
+    if authorization == "Bearer tok-trade":
+        return {"access": "trade", "daily_limit_usd": 250,
+                "spent_today_usd": 40.5, "remaining_today_usd": 209.5}
+    return {"access": "read_only"}
 
 
 def _tool_result(payload, *, error=False):
@@ -181,6 +189,14 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if method == "tools/list":
             self.state["list_calls"] += 1
             tools = [{"name": name, "inputSchema": {"type": "object"}} for name in BASE_TOOLS]
+            if self.state["access_mode"]:
+                for tool in tools:
+                    if tool["name"] == "whoami":
+                        tool["description"] = (
+                            "Shows which CoinFello account and automation wallet the session "
+                            "acts as, whether it is read-only or can trade (and its daily "
+                            "limit), and when it expires."
+                        )
             if self.state["browser_sign_in"]:
                 tools += [
                     {"name": name, "inputSchema": {"type": "object"}}
@@ -201,12 +217,25 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             self._json(200, _rpc_response(message_id, _tool_result(BROWSER_SIGN_IN)))
             return
         if name == "renew_session" and state["browser_sign_in"]:
-            self._json(200, _rpc_response(message_id, _tool_result(RENEWED)))
+            renewed = dict(RENEWED)
+            if self.headers.get("Authorization") == "Bearer tok-trade":
+                renewed["session_token"] = "tok-trade"  # renewal keeps the access
+            self._json(200, _rpc_response(message_id, _tool_result(renewed)))
             return
         if name == "sign_out":
             time.sleep(state["sign_out_delay"])
             state["signed_out_tokens"].append(self.headers.get("Authorization"))
             self._json(200, _rpc_response(message_id, _tool_result("Signed out.")))
+            return
+        if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
+                and state["access_mode"]
+                and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
+            state["refused_read_only"].append(name)
+            self._json(200, _rpc_response(message_id, _tool_result(
+                "This session is read-only, so it cannot move funds. To trade, sign in "
+                "again with start_browser_sign_in and choose a daily limit on the "
+                "approval page. Email-code sign-in always gives a read-only session.",
+                error=True)))
             return
         if name == "prepare_send" and state["actions"]:
             if not str(arguments.get("recipient", "")).startswith("0x"):
@@ -278,6 +307,9 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             approval_id = arguments.get("approval_id", "")
             if approval_id.startswith("2222"):  # a browser sign-in
                 payload = SESSION if state["browser_approved"] else PENDING
+                if state["browser_approved"] and state["access_mode"]:
+                    payload = {**SESSION, "session_token": "tok-trade",
+                               "access": "trade", "daily_limit_usd": 250}
                 self._json(200, _rpc_response(message_id, _tool_result(payload)))
             elif approval_id.startswith("1111"):
                 self._json(200, _rpc_response(message_id, _tool_result(PENDING)))
@@ -290,7 +322,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 )
             return
         if name == "whoami":
-            self._json(200, _rpc_response(message_id, _tool_result(WHOAMI)))
+            payload = dict(WHOAMI)
+            if state["access_mode"]:
+                payload.update(_access_for(self.headers.get("Authorization"), state))
+            self._json(200, _rpc_response(message_id, _tool_result(payload)))
             return
         if name == "get_balances":
             if state["sse_mode"]:
@@ -355,6 +390,10 @@ def mock_mcp(monkeypatch):
         # tests opt in to the new server shape.
         "browser_sign_in": False,
         "browser_approved": False,
+        # tokens are read-only unless minted with trade
+        # access ("tok-trade" here); whoami and refusals follow the token.
+        "access_mode": False,
+        "refused_read_only": [],
         "sign_out_delay": 0.0,
         "signed_out_tokens": [],
         # Older servers have no send/swap/embed tools.

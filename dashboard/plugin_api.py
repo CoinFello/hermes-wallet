@@ -37,6 +37,12 @@ def _safe(action: Callable[[], Any]) -> Any:
         return action()
     except core.NotSignedIn as exc:
         return {"ok": False, "error": f"Not signed in to CoinFello. {exc}"}
+    except core.NeedsTradingAccess:
+        return {
+            "ok": False,
+            "needs_trading_access": True,
+            "error": "This session is read-only. Enable trading to send or swap.",
+        }
     except (core.MCPError, ValueError, RuntimeError) as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:  # plugin contract: never raise out

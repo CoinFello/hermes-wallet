@@ -41,6 +41,41 @@ class NotSignedIn(Exception):
     """Raised when an action needs a CoinFello session and none is stored."""
 
 
+class NeedsTradingAccess(Exception):
+    """The session is read-only: it can read and quote,
+    but the server refuses anything that moves funds."""
+
+    MESSAGE = (
+        "This CoinFello session is read-only, so it cannot move funds. Nothing "
+        "was sent. To trade, call coinfello_connect: it starts a new browser "
+        "sign-in where the human picks a daily limit. Send its user_message to "
+        "the human exactly as written, then poll coinfello_poll_approval."
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
+def _is_read_only_refusal(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "read-only" in text or "read only" in text
+
+
+def trading_call(name: str, payload: dict | None = None, *, timeout: float = 90.0):
+    """``call`` for the tools that move funds: refuses up front when the
+    session is known read-only, and turns the server's read-only refusal into
+    NeedsTradingAccess, so callers get one clear next step either way."""
+    if load_state().get("access") == "read_only":
+        raise NeedsTradingAccess()
+    try:
+        return call(name, payload, timeout=timeout)
+    except ToolError as exc:
+        if _is_read_only_refusal(exc):
+            save_state({"access": "read_only", "daily_limit_usd": None})
+            raise NeedsTradingAccess() from exc
+        raise
+
+
 def _text(result) -> str:
     if isinstance(result, str):
         return result
@@ -71,10 +106,12 @@ def server_tools(*, refresh: bool = False) -> frozenset:
         and time.monotonic() - _capabilities["at"] < CAPABILITY_TTL_SECONDS
     )
     if refresh or not fresh:
-        names = frozenset(
-            tool.get("name", "") for tool in _client(timeout=20.0).list_tools()
+        tools = _client(timeout=20.0).list_tools()
+        names = frozenset(tool.get("name", "") for tool in tools)
+        descriptions = {tool.get("name", ""): tool.get("description") or "" for tool in tools}
+        _capabilities.update(
+            url=url, tools=names, descriptions=descriptions, at=time.monotonic()
         )
-        _capabilities.update(url=url, tools=names, at=time.monotonic())
     return _capabilities["tools"]
 
 
@@ -83,6 +120,18 @@ def supports(tool: str) -> bool:
         return tool in server_tools()
     except MCPError:
         return False
+
+
+def offers_access_choice() -> bool:
+    """True on servers where a session is read-only unless the human picks a
+    daily trading limit at browser sign-in. Detected
+    from whoami's own description, so older servers keep the old flow."""
+    try:
+        server_tools()
+    except MCPError:
+        return False
+    whoami = (_capabilities.get("descriptions") or {}).get("whoami", "")
+    return "read-only" in whoami.lower()
 
 
 def sign_in_mode() -> str:
@@ -165,8 +214,55 @@ def call(name: str, payload: dict | None = None, *, timeout: float = 90.0):
 
 # -- sign-in -----------------------------------------------------------------
 
+def sign_in_steps(code: str, url: str, *, upgrade: bool = False) -> list[str]:
+    """The approval page's steps, in the order it asks for them.
+
+    One source for the pane and the agent: the agent relays ``user_message``
+    verbatim rather than paraphrasing, because a paraphrase put the code
+    before the CoinFello login and the login then looked like a mistake.
+    """
+    steps = [
+        f"Open {url} in your regular web browser (if you're already signed in "
+        "to CoinFello there, the next step is skipped).",
+        "Sign in to your CoinFello account with your email or phone, like any "
+        "CoinFello login. This is not where the code goes.",
+        f"When the page asks for your agent's code, type: {code}",
+    ]
+    if offers_access_choice():
+        steps.append(
+            "Choose what your agent may do: Read only, or trade up to a daily "
+            "limit ($50, $250 or $1,000)."
+            + (" Pick a daily limit, since you're enabling trading." if upgrade else "")
+        )
+    steps.append("Approve. Hermes picks up the sign-in on its own; nothing to paste back.")
+    return steps
+
+
+def _sign_in_message(code: str, url: str, *, upgrade: bool) -> str:
+    lead = (
+        "Your CoinFello session is read-only. To let me trade, sign in again "
+        "and choose a daily limit:"
+        if upgrade
+        else "To connect CoinFello:"
+    )
+    numbered = "\n".join(f"{i}. {step}" for i, step in enumerate(sign_in_steps(code, url, upgrade=upgrade), 1))
+    return f"{lead}\n{numbered}\nThe code expires in 10 minutes."
+
+def _access_fields(result: dict) -> dict:
+    """The session's access as the server reports it (whoami / sign-in result).
+    Absent on older servers, whose sessions could always trade."""
+    if "access" not in result:
+        return {}
+    access = result.get("access")
+    return {
+        "access": access,
+        "daily_limit_usd": result.get("daily_limit_usd") if access == "trade" else None,
+    }
+
+
 def _store_session(result: dict, **extra) -> dict:
-    return save_state(
+    previous = (load_state().get("session_token") or "").strip()
+    state = save_state(
         {
             "session_token": result["session_token"],
             "wallet_address": result.get("wallet_address") or "",
@@ -174,13 +270,24 @@ def _store_session(result: dict, **extra) -> dict:
             # Who approved the sign-in (email, else phone). Whoever approves
             # the browser link is who the plugin now acts as, so it is shown.
             "signed_in_as": result.get("signed_in_as") or "",
+            "access": None,
+            "daily_limit_usd": None,
+            **_access_fields(result),
             "pending_approval_id": "",
             "pending_user_code": "",
             "pending_approval_url": "",
+            "pending_upgrade": False,
             "renew_attempted_at": 0,
             **extra,
         }
     )
+    # An upgrade (read-only -> trading) replaces a live session: end the old
+    # one server-side so a read-only token is not left valid for 30 days.
+    if previous and previous != result["session_token"]:
+        threading.Thread(
+            target=_revoke_on_server, args=(previous,), name="coinfello-replace", daemon=True
+        ).start()
+    return state
 
 
 def start_browser_sign_in() -> dict:
@@ -193,21 +300,32 @@ def start_browser_sign_in() -> dict:
     result = _client().call_tool("start_browser_sign_in", {})
     if not isinstance(result, dict) or not result.get("approval_url"):
         raise RuntimeError(_text(result))
+    upgrade = signed_in()
+    code = result.get("user_code") or ""
     save_state(
         {
             "pending_approval_id": result.get("approval_id") or "",
-            "pending_user_code": result.get("user_code") or "",
+            "pending_user_code": code,
             "pending_approval_url": result["approval_url"],
+            "pending_upgrade": upgrade,
         }
     )
     return {
         "ok": True,
         "status": "approval_required",
         "approval_url": result["approval_url"],
-        "user_code": result.get("user_code") or "",
+        "user_code": code,
         "approval_id": result.get("approval_id") or "",
         "expires_in_seconds": result.get("expires_in_seconds"),
-        "message": _text(result),
+        "upgrade": upgrade,
+        "steps": sign_in_steps(code, result["approval_url"], upgrade=upgrade),
+        "user_message": _sign_in_message(code, result["approval_url"], upgrade=upgrade),
+        "next": (
+            "Send user_message to the human exactly as written (the steps are "
+            "in the order the page asks for them; do not reorder or shorten "
+            "them, and do not open the link yourself or in an in-app preview). "
+            "Then call coinfello_poll_approval every 5-10 seconds."
+        ),
     }
 
 
@@ -283,19 +401,55 @@ def poll_approval(approval_id: str | None = None) -> dict:
         return {"ok": True, "status": "pending"}
     if result.get("session_token"):
         state = _store_session(result)
-        return {
+        out = {
             "ok": True,
             "status": "signed_in",
             "wallet_address": state.get("wallet_address") or "",
+            "signed_in_as": state.get("signed_in_as") or "",
             "expires_at": state.get("expires_at") or "",
+            **_access_summary(state),
         }
+        out["user_message"] = _signed_in_message(out)
+        return out
     raise RuntimeError(_text(result))
+
+
+def _access_summary(state: dict) -> dict:
+    """``access`` / ``can_trade`` / ``daily_limit_usd`` for status and results.
+    No access field means an older server, where any session traded."""
+    access = state.get("access")
+    if not access:
+        return {"access": "unknown", "can_trade": True}
+    return {
+        "access": access,
+        "can_trade": access == "trade",
+        "daily_limit_usd": state.get("daily_limit_usd"),
+    }
+
+
+def _signed_in_message(result: dict) -> str:
+    who = result.get("signed_in_as") or result.get("wallet_address") or "your account"
+    if result.get("access") == "read_only":
+        what = (
+            "The session is read-only: I can read balances and quote trades but "
+            "not move funds. To trade, ask me to enable trading."
+        )
+    elif result.get("access") == "trade":
+        what = f"I can trade up to ${result.get('daily_limit_usd')} a day, each trade after you approve it."
+    else:
+        what = ""
+    return f"Signed in to CoinFello as {who}. {what} If that's not your account, sign out now.".replace("  ", " ")
 
 
 def cancel_sign_in() -> dict:
     """Forget a pending approval (the link simply expires server-side)."""
     save_state(
-        {"pending_approval_id": "", "pending_user_code": "", "pending_approval_url": ""}
+        {
+            "pending_approval_id": "",
+            "pending_user_code": "",
+            "pending_approval_url": "",
+            "pending_upgrade": False,
+        }
     )
     return {"ok": True}
 
@@ -359,26 +513,55 @@ def status(*, live: bool = True) -> dict:
         summary["pending_approval_url"] = state.get("pending_approval_url") or ""
         if live:
             summary["sign_in_mode"] = sign_in_mode()
+            if summary["pending_approval_id"]:
+                summary["sign_in_steps"] = sign_in_steps(
+                    summary["pending_user_code"], summary["pending_approval_url"]
+                )
         return summary
     summary["connected"] = True
     summary["wallet_address"] = state.get("wallet_address") or ""
     summary["expires_at"] = state.get("expires_at") or ""
     summary["signed_in_as"] = state.get("signed_in_as") or state.get("email") or ""
+    summary.update(_access_summary(state))
+    if state.get("pending_approval_id"):
+        # Signed in, with a sign-in in flight: the read-only -> trading upgrade.
+        summary["pending_approval_id"] = state["pending_approval_id"]
+        summary["pending_user_code"] = state.get("pending_user_code") or ""
+        summary["pending_approval_url"] = state.get("pending_approval_url") or ""
+        summary["pending_upgrade"] = bool(state.get("pending_upgrade"))
     if not live:
         return summary
     # Carried while signed in so the pane can show the right sign-in form the
     # instant the user signs out (cached capability probe: no extra request).
     summary["sign_in_mode"] = sign_in_mode()
+    if summary.get("pending_approval_id"):
+        summary["sign_in_steps"] = sign_in_steps(
+            summary["pending_user_code"], summary["pending_approval_url"],
+            upgrade=summary.get("pending_upgrade", False),
+        )
     try:
         who = call("whoami", {}, timeout=15.0)
         if isinstance(who, dict):
             summary["wallet_address"] = who.get("wallet_address") or summary["wallet_address"]
             summary["expires_at"] = who.get("expires_at") or summary["expires_at"]
             summary["server_confirmed"] = True
+            access = _access_fields(who)
+            if access:
+                save_state(access)  # the server decides; keep the local copy honest
+                summary.update(_access_summary({**state, **access}))
+            for key in ("spent_today_usd", "remaining_today_usd"):
+                if who.get(key) is not None:
+                    summary[key] = who[key]
     except (MCPError, ToolError, NotSignedIn) as exc:
         summary["connected"] = False
         summary["error"] = str(exc)
         summary["sign_in_mode"] = sign_in_mode()
+    if summary.get("access") == "read_only":
+        summary["next"] = (
+            "Read-only session: reads and quotes work, trades are refused. To "
+            "trade, call coinfello_connect (it starts the upgrade) and send its "
+            "user_message to the human exactly as written."
+        )
     return summary
 
 
@@ -411,8 +594,11 @@ def portfolio() -> dict:
     model["portfolio_url"] = app_url("/portfolio")
     model["strategies_url"] = app_url("/strategies")
     model["running_url"] = app_url("/portfolio/running")
-    model["can_send"] = supports("prepare_send") and supports("execute_intent")
-    model["can_swap"] = supports("create_embed_token")
+    access = _access_summary(load_state())
+    model["access"] = access["access"]
+    model["can_trade"] = access["can_trade"]
+    model["can_send"] = access["can_trade"] and supports("prepare_send") and supports("execute_intent")
+    model["can_swap"] = access["can_trade"] and supports("create_embed_token")
     return model
 
 
@@ -436,7 +622,7 @@ def prepare_send(chain_id: Any, token: str, amount: str, recipient: str) -> dict
     recipient = str(recipient or "").strip()
     if not amount or not recipient:
         raise ValueError("amount and recipient are required")
-    result = call(
+    result = trading_call(
         "prepare_send",
         {"chain_id": chain, "token": str(token), "amount": amount, "recipient": recipient},
     )
@@ -456,7 +642,7 @@ def execute_intent(intent_id: str) -> dict:
     if not intent_id:
         raise ValueError("intent_id is required")
     try:
-        result = call("execute_intent", {"intent_id": intent_id}, timeout=180.0)
+        result = trading_call("execute_intent", {"intent_id": intent_id}, timeout=180.0)
     except ToolError as exc:
         # The server's own words (expired, already used, price moved, ...).
         text = str(exc)
@@ -505,7 +691,7 @@ def embed_token(scope: str = "swap") -> dict:
     """
     if not supports("create_embed_token"):
         raise RuntimeError("Swapping from Hermes needs a CoinFello server update.")
-    result = call("create_embed_token", {"scope": scope}, timeout=20.0)
+    result = trading_call("create_embed_token", {"scope": scope}, timeout=20.0)
     if not isinstance(result, dict) or not result.get("embed_token"):
         raise RuntimeError(_text(result))
     return {
