@@ -71,6 +71,25 @@ never in `config.yaml`.
 > Hermes release moves those helpers, the plugin falls back to a 0600 state
 > file inside the plugin directory.
 
+## The pane
+
+- **Header:** the CoinFello logo (wordmark follows your theme's text colour),
+  connection state, and a **Settings** gear.
+- **Home:** the automations wallet (address + copy), portfolio total and 24h
+  change, and Send / Swap / Receive (Receive shows the funding QR). Below that,
+  assets grouped by network and links to the full portfolio and strategies.
+  A read-only session or a pending allowance change shows one notice that
+  opens Settings.
+- **Settings:** the trading allowance (daily limit, what's left in the last
+  24 hours, change it without signing in again), the account and sign-out,
+  and the server in use.
+
+The styling is one stylesheet scoped to `.cf`, injected at register and
+removed on dispose. Surfaces, text, borders, fonts and gain/loss colours come
+from the active Hermes theme (`--ui-*`, `--font-*`, `--ui-green`/`--ui-red`);
+CoinFello contributes the brand yellow for the primary action and accents,
+the serif portfolio figures, round token icons and rounded cards.
+
 ## Sign-in flow
 
 **Browser-first** (CoinFello servers with `start_browser_sign_in`):
