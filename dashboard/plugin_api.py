@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 # Loaded standalone by the dashboard importer (spec_from_file_location), so
 # package-relative imports are unavailable: put the plugin directory on the
@@ -26,7 +26,9 @@ if str(_PLUGIN_DIR) not in sys.path:
 from fastapi import APIRouter  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+import coinfello_cards as cards  # noqa: E402
 import coinfello_core as core  # noqa: E402
+import coinfello_earn as earn  # noqa: E402
 
 router = APIRouter()
 
@@ -128,13 +130,43 @@ def intent_execute(body: IntentBody):
 class EmbedTokenBody(BaseModel):
     """Which embedded view the token is for; the pane's swap view sends none."""
 
-    scope: Literal["swap", "portfolio"] = "swap"
+    scope: Literal["swap", "earn", "portfolio"] = "swap"
+
+
+EARN_READ_ONLY = (
+    "This session is read-only, so Earn cannot open for deposits. "
+    "Close this and set a daily limit to deposit."
+)
 
 
 @router.post("/embed-token")
 def embed_token(body: Optional[EmbedTokenBody] = None):
     scope = body.scope if body else "swap"
-    return _safe(lambda: core.embed_token(scope))
+    if scope != "earn":
+        return _safe(lambda: core.embed_token(scope))
+
+    def mint_earn():
+        try:
+            return core.embed_token("earn")
+        except core.NeedsTradingAccess:
+            # The server refused a read-only session. Say it in the pane's
+            # words (the server's are written for the agent).
+            return {"ok": False, "needs_trading_access": True, "error": EARN_READ_ONLY}
+
+    return _safe(mint_earn)
+
+
+# -- the Earn view: "open Earn" requests the model leaves (coinfello_earn) -------
+
+
+@router.get("/earn/request")
+def earn_request():
+    return _safe(lambda: {"ok": True, "request": earn.pending_request()})
+
+
+@router.post("/earn/request/{request_id}/consume")
+def earn_request_consume(request_id: str):
+    return _safe(lambda: earn.consume_request(request_id))
 
 
 class LimitBody(BaseModel):
@@ -167,3 +199,44 @@ def forget_account():
         return {"ok": True}
 
     return _safe(run)
+
+
+# -- MCP App cards (coinfello_show_card) -----------------------------------------
+# The pane mounts each card in a sandboxed frame and relays its bridge here.
+# coinfello_cards decides what a card may call; /call never runs a tool that
+# moves funds, it returns the confirmation, and only /execute (the pane's
+# Confirm button) runs it.
+
+
+class CardCallBody(BaseModel):
+    tool: str
+    arguments: Optional[Dict[str, Any]] = None
+
+
+class CardExecuteBody(BaseModel):
+    confirm_id: str
+
+
+@router.get("/cards")
+def cards_list():
+    return _safe(lambda: {"ok": True, "cards": cards.list_cards()})
+
+
+@router.get("/cards/{card_id}")
+def card_document(card_id: str, theme: Optional[str] = None):
+    return _safe(lambda: cards.card_document(card_id, theme or ""))
+
+
+@router.post("/cards/{card_id}/call")
+def card_call(card_id: str, body: CardCallBody):
+    return _safe(lambda: cards.card_call(card_id, body.tool, body.arguments or {}))
+
+
+@router.post("/cards/{card_id}/execute")
+def card_execute(card_id: str, body: CardExecuteBody):
+    return _safe(lambda: cards.card_execute(card_id, body.confirm_id))
+
+
+@router.post("/cards/{card_id}/dismiss")
+def card_dismiss(card_id: str):
+    return _safe(lambda: cards.dismiss_card(card_id))

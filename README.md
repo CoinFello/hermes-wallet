@@ -7,12 +7,13 @@ activity, prices, yields, swap/bridge quotes) plus **Fello**, CoinFello's DeFi
 agent, which can execute on-chain actions for you.
 
 Includes a desktop pane: one-click browser sign-in, the automations wallet
-(copy + QR to fund it), and balances per network, shaped like the CoinFello
-Portfolio view.
+(copy + QR to fund it), balances per network shaped like the CoinFello
+Portfolio view, and CoinFello's MCP App cards (portfolio, quotes,
+automations, yields, ...) when the agent shows one.
 
 ## What you get
 
-**19 agent tools** (toolset `coinfello`):
+**22 agent tools** (toolset `coinfello`):
 
 | Tool | What it does |
 |---|---|
@@ -29,6 +30,8 @@ Portfolio view.
 | `coinfello_execute` | Run a prepared intent ON-CHAIN, only after you approve its summary in Hermes |
 | `coinfello_transfer_status` | What a swap/bridge actually delivered: completed, wrong_token, refunded, failed |
 | `coinfello_yields` / `_prices` | Market reads |
+| `coinfello_show_card` | Show a CoinFello card: drawn in the desktop pane; other surfaces get its text |
+| `coinfello_set_daily_limit` / `_limit_status` | Lower the daily limit, or ask the human to approve a raise |
 
 **Desktop pane** (desktop half of the same package):
 
@@ -40,6 +43,7 @@ Portfolio view.
   with token logos, using the same rules as the web Portfolio view
   (`coinfello_portfolio.py` names the web function each rule is ported from).
 - **Portfolio / Strategies** buttons open the full views in CoinFello.
+- **Cards** the agent shows appear at the top of the pane (see below).
 - Statusbar connection chip.
 
 ## Install
@@ -149,6 +153,97 @@ refused unless you configured them to auto-approve.
 Servers without `prepare_swap` (older CoinFello servers) cannot
 prepare trades; `coinfello_transfer_status` then reads LI.FI directly.
 
+## Cards (MCP Apps)
+
+CoinFello's MCP server ships its views as MCP App cards: `show_<card>_card`
+tools whose `_meta.ui.resourceUri` names a `ui://coinfello/...` HTML
+document. The agent shows one with `coinfello_show_card` (`portfolio`,
+`status`, `quote`, `automations`, `needs_you`, `error`, `fund`, `yield`,
+`lp_ranges`, `perp`, `send`, `dca`, `earn_deposit`, `spend_limit`; the
+sign-in card is left out, the pane has its own sign-in).
+
+1. The plugin calls the server's card tool with the stored session, sending
+   only the arguments the tool's schema declares, never a session token.
+2. On **Hermes desktop** (`ctx.session_surface() == "desktop"`) the raw
+   result becomes a card record (memory and `<hermes home>/coinfello/cards/`,
+   0600, 24 hours), the pane is told (`plugin.coinfello.card.shown`), and the
+   agent is told the card is in the pane. On every other surface (Telegram,
+   CLI, ...) the agent gets the card's full text and no card is stored.
+3. The pane fetches `/cards/{id}`: the card's HTML with a CSP meta tag and
+   the theme injected, as a `data:` URL, plus the tool input and result. It
+   mounts it in a `SandboxedFrame` (`allow-scripts` only: opaque origin, no
+   storage, no popups) and answers the card's MCP Apps bridge.
+
+What a card may call, checked in the pane and again in Python:
+
+| Card | Relayed | Needs the human's Confirm in the pane |
+|---|---|---|
+| every card | its own `show_*_card` (refresh), `whoami` | |
+| quote | `prepare_swap`, `prepare_send` | `execute_intent` |
+| send / dca / earn_deposit / spend_limit | its `prepare_*` | `execute_intent` |
+| automations | `pause_automation` | `cancel_automation` |
+| error | its Retry tool, if on the server's retryable list (reads and quotes) | |
+
+`execute_intent` runs only for an intent this card produced and Hermes
+prepared (the server's summary, kept with the card record, is what the
+confirmation shows), once and before it expires.
+`cancel_automation` runs only for an automation the card listed. Sign-out,
+Fello, sign-in, session renewal, embed tokens and daily-limit changes are
+never relayed, nor is anything not in the table. Credential-like keys are
+stripped from arguments and results in both directions.
+
+The card's CSP: `default-src 'none'; script-src 'unsafe-inline'; style-src
+'unsafe-inline' <resourceDomains>; font-src <resourceDomains>; img-src data:;
+connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'`.
+
+Cards need Hermes 0.22.3 or newer (`ctx.session_surface`); on older Hermes
+the tool returns the card's text everywhere. The plugin does not advertise
+the MCP Apps extension to the server, so card tools always answer with
+their full text plus `structuredContent`, on every surface.
+
+### Swap, Earn and Full portfolio: CoinFello's own UI in Hermes
+
+The pane's **Swap** and **Earn** buttons host coinfello-web's `/embed/swap`
+and `/embed/earn` (the app's real components) in a `SandboxedFrame`, and
+**Full portfolio** docks `/embed/portfolio` in a main-area tab. One host
+serves all three (`desktop/plugin.js`, the `embed-host` section): the frame
+loads `<app><path>?theme=dark|light`, says `coinfello:embed-ready`, and gets
+a 15-minute token minted for its scope (`POST /embed-token {scope}` ->
+`create_embed_token`, never the session token) with a per-mount nonce. A
+later token request must echo the nonce, and one within a minute of the
+last token stops instead of looping on a dead session. Messages from any
+window but the host's own frame are ignored; heights are clamped to
+240-1200px.
+
+- **Links**: the sandbox has no `allow-popups`, so an embed asks the pane
+  with `coinfello:open-url`; only allowlisted https block explorers open, at
+  most once a second. An embed that can do this says so in `embed-ready`
+  (`features: ['open-url']`), and its own View button is the only one.
+  For older embeds the pane adds one fallback View under the frame.
+- **Results** arrive as `coinfello:swap-result` / `coinfello:earn-result`
+  (the portfolio view has none). An Earn result says "nothing was sent" only
+  for a cancel or failure with no transaction, and anything uncertain asks
+  the person to check it.
+- **Scopes**: swap needs trading access; Earn is always asked of the server
+  (it may mint for browsing); portfolio is minted with a plain read call,
+  only when the server's `scope` enum lists `portfolio`.
+
+- **Earn preselects**: `&opportunity=<yield id>`, or `&token=<SYMBOL>&chain_id=<n>`,
+  validated and percent-encoded by `coinfello_earn.frame_query`.
+- **From the agent**: `coinfello_show_card` with `card="earn_deposit"` on
+  Hermes desktop opens the Earn view (with any preselect from its
+  arguments) instead of the typed-yield-id card, and calls no CoinFello tool.
+  Other surfaces keep the card's text. This reuses `coinfello_show_card`
+  rather than adding a tool: it is where the agent already goes to deposit,
+  and it keeps the desktop-or-text rule in one place. The `yield` card is
+  unchanged.
+- **Read-only sessions** may open Earn: the server decides whether to mint a
+  token for browsing, and a refusal is shown in plain words.
+- **Older servers** (no `scope` on `create_embed_token`, or one without
+  `earn`): no Earn button, a one-line note, and `earn_deposit` on desktop
+  shows the read-only `yield` card when it has a token to show (otherwise
+  the deposit card, as before).
+
 ## Security notes
 
 - The MCP session token can move funds from the automation wallet. Treat it
@@ -165,6 +260,9 @@ prepare trades; `coinfello_transfer_status` then reads LI.FI directly.
 
 ```bash
 uv run --no-project --with pytest --with fastapi --with httpx --with 'segno>=1.6,<2' pytest tests/
+node --test tests/card_bridge.test.mjs   # the pane's card bridge (pytest runs it too when node is installed)
+node --test tests/amount.test.mjs        # the pane's amount normalizer (likewise)
+node --test tests/embed_host.test.mjs    # the pane's swap/Earn/portfolio embed host (likewise)
 ```
 
 The test suite runs a local mock of the MCP streamable-HTTP transport — no
@@ -182,12 +280,18 @@ network or real credentials involved.
 ├── coinfello_portfolio.py pane portfolio model, ported from the web Portfolio view
 ├── coinfello_tools.py     tool schemas + handlers
 ├── coinfello_trades.py    prepare/execute, the approval hook, transfer status
+├── coinfello_cards.py     MCP App cards: show, card records, CSP, bridge allowlist
+├── coinfello_earn.py      the Earn view: preselects, frame query, the agent's open request
 ├── dashboard/             web/desktop backend: FastAPI router at /api/plugins/coinfello/
-├── desktop/plugin.js      desktop pane + statusbar chip
+├── desktop/plugin.js      desktop pane + statusbar chip + card frames
 └── tests/                 mock-MCP test suite
 ```
 
 ### Roadmap
+
+- **Wide cards**: cards target ~480px and the pane is ~320px, so a card that
+  overflows is scaled down. Opening a card in the main workspace
+  (`host.openWorkspace`) would give it full width.
 
 - **Embedded portfolio + strategies**: `/embed/*` routes in coinfello-web
   (same components as the real pages, short-lived scoped token) hosted in a

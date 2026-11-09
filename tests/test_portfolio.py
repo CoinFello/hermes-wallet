@@ -31,6 +31,15 @@ def test_format_balance_matches_token_row(balance, expected):
     assert p.format_balance(balance) == expected
 
 
+@pytest.mark.parametrize(
+    ("balance", "expected"),
+    [("1e-07", "0.0000001"), (1e-07, "0.0000001"), ("0.5", "0.5"), ("1000", "1000"), ("n/a", "n/a")],
+)
+def test_balance_is_a_plain_decimal_for_max(balance, expected):
+    # The pane's Max button copies it into the amount field, which takes no exponent.
+    assert p.plain_decimal(balance) == expected
+
+
 def test_format_usd():
     assert p.format_usd(1234.5) == "$1,234.50"
     assert p.format_usd(0.005) == "$0.01"

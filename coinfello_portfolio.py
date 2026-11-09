@@ -75,6 +75,16 @@ def format_balance(balance: Any) -> str:
     return f"{whole}.{frac.ljust(2, '0')}"
 
 
+def plain_decimal(balance: Any) -> str:
+    """The balance as a plain decimal string ("1e-07" -> "0.0000001"), the
+    form the pane's Max button hands to an amount field."""
+    try:
+        value = Decimal(str(balance))
+    except (InvalidOperation, ValueError):
+        return str(balance)
+    return format(value, "f") if value.is_finite() else str(balance)
+
+
 def format_usd(value: float | None) -> str:
     """en-US currency, narrow symbol, exactly two decimals; em dash when unknown."""
     if value is None:
@@ -178,7 +188,7 @@ def _token_row(token: dict) -> dict:
         "name": token.get("name") or "",
         "address": token.get("address") or "",
         "chain_id": token.get("chainId"),
-        "balance": str(token.get("balance", "0")),
+        "balance": plain_decimal(token.get("balance", "0")),
         "balance_text": format_balance(token.get("balance", "0")),
         "value_text": format_usd(token.get("valueUsd")),
         "change_text": format_change(pct),

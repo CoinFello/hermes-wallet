@@ -77,3 +77,36 @@ def test_route_defaults_to_swap_and_accepts_portfolio(server):
     portfolio = client.post("/api/plugins/coinfello/embed-token", json={"scope": "portfolio"}).json()
     assert portfolio["ok"] is True and portfolio["embed_url"].endswith("/embed/portfolio")
     assert client.post("/api/plugins/coinfello/embed-token", json={"scope": "admin"}).status_code == 422
+
+
+# -- alongside the Earn embed: one create_embed_token, one scope enum -----------------
+
+
+def test_one_server_can_offer_earn_and_the_portfolio(server):
+    server.mock_state["embed_scopes"] = ("swap", "earn")  # plus portfolio, from portfolio_embed
+    core.server_tools(refresh=True)
+    model = core.portfolio()
+    assert model["can_view_portfolio"] is True and model["earn_supported"] is True
+    assert core.embed_token("earn")["token"] == "cfemb_earn"
+    assert core.embed_token("portfolio")["token"] == "cfemb_portfolio"
+    assert _embed_calls(server) == [{"scope": "earn"}, {"scope": "portfolio"}]
+
+
+def test_an_earn_only_enum_keeps_the_portfolio_in_the_browser(server):
+    server.mock_state.update(embed_scopes=("swap", "earn"), portfolio_embed=False)
+    core.server_tools(refresh=True)
+    model = core.portfolio()
+    assert model["can_view_portfolio"] is False and model["earn_supported"] is True
+    with pytest.raises(RuntimeError, match="needs a CoinFello server update"):
+        core.embed_token("portfolio")
+    assert _embed_calls(server) == []
+
+
+def test_the_route_mints_every_scope_the_pane_hosts(server):
+    server.mock_state["embed_scopes"] = ("swap", "earn")
+    core.server_tools(refresh=True)
+    client = _api()
+    for scope in ("swap", "earn", "portfolio"):
+        minted = client.post("/api/plugins/coinfello/embed-token", json={"scope": scope}).json()
+        assert minted["ok"] is True and minted["embed_url"].endswith(f"/embed/{scope}")
+    assert _embed_calls(server) == [{"scope": "swap"}, {"scope": "earn"}, {"scope": "portfolio"}]

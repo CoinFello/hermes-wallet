@@ -10,7 +10,9 @@ description: >
   reads over the automation wallet (balances, positions, LP ranges, open
   orders, activity, prices, yields, swap/bridge quotes) plus Fello,
   CoinFello's DeFi agent, which can execute on-chain actions. Includes a
-  desktop pane for sign-in, wallet overview and sign-out.
+  desktop pane for sign-in, wallet overview and sign-out, which also draws
+  CoinFello's MCP App cards (portfolio, quotes, automations, ...) the agent
+  shows with coinfello_show_card.
 requires_hermes: ">=0.21.0"
 provides_tools:
   - coinfello_status
@@ -34,6 +36,7 @@ provides_tools:
   - coinfello_transfer_status
   - coinfello_yields
   - coinfello_prices
+  - coinfello_show_card
 provides_hooks:
   - pre_tool_call
 optional_env:

@@ -10,6 +10,8 @@ tolerating both ``application/json`` and ``text/event-stream`` responses
 from __future__ import annotations
 
 import json
+import logging
+import re
 import threading
 import urllib.error
 import urllib.parse
@@ -19,8 +21,30 @@ PROTOCOL_VERSION = "2025-06-18"
 CLIENT_INFO = {"name": "hermes-coinfello-plugin", "version": "0.1.0"}
 
 
+#: The only MCP App resources the plugin renders: CoinFello's own cards.
+CARD_URI_PREFIX = "ui://coinfello/"
+#: MCP Apps (SEP-1865) HTML resource type.
+CARD_MIME = "text/html;profile=mcp-app"
+#: JSON-RPC "invalid params": the server's schema refused a tool's arguments.
+INVALID_PARAMS = -32602
+#: How the MCP SDK words that refusal when it returns it as a tool result.
+#: Anchored: a tool's own error (an execute_intent JSON quoting a node's
+#: -32602) is the server's words and stays whole.
+_VALIDATION_RE = re.compile(r"\s*(?:MCP error -32602:|Input validation error:)")
+
+log = logging.getLogger(__name__)
+
+
 class MCPError(Exception):
-    """Transport- or protocol-level failure (unreachable, bad response)."""
+    """Transport- or protocol-level failure (unreachable, bad response).
+
+    ``detail`` keeps the server's full text when the message is a shortened,
+    readable form of it.
+    """
+
+    def __init__(self, message: str = "", detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
 
 
 class ToolError(MCPError):
@@ -37,6 +61,56 @@ def _header(headers: dict, name: str) -> str | None:
         if str(key).lower() == lowered:
             return value
     return None
+
+
+def is_card_mime(value) -> bool:
+    """``text/html;profile=mcp-app``, ignoring case and spacing."""
+    return isinstance(value, str) and value.replace(" ", "").lower() == CARD_MIME
+
+
+def result_text(result: dict) -> str:
+    """The text blocks of a CallToolResult, joined."""
+    content = (result or {}).get("content") or []
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
+
+
+def _issue_text(issue) -> str | None:
+    if not isinstance(issue, dict):
+        return None
+    message = str(issue.get("message") or "").strip()
+    path = ".".join(str(part) for part in issue.get("path") or [])
+    if path and message:
+        return f"{path}: {message}"
+    return message or (f"{path}: not accepted" if path else None)
+
+
+def validation_message(text: str, code=None) -> str | None:
+    """A readable form of an input-validation (-32602) error, or None when
+    ``text`` is not one.
+
+    The server reports a schema refusal as ``MCP error -32602: Input
+    validation error: Invalid arguments for tool X: [<zod issues as JSON>]``;
+    this keeps each issue's field and message (``amount: A decimal number,
+    e.g. "1.5"``) and drops the JSON.
+    """
+    text = str(text or "")
+    if code != INVALID_PARAMS and not _VALIDATION_RE.match(text):
+        return None
+    start, end = text.find("["), text.rfind("]")
+    if 0 <= start < end:
+        try:
+            issues = json.loads(text[start:end + 1])
+        except ValueError:
+            issues = None
+        if isinstance(issues, list):
+            readable = [line for line in map(_issue_text, issues) if line]
+            if readable:
+                return "; ".join(readable)
+    return "CoinFello did not accept those arguments."
 
 
 def _parse_sse(text: str) -> list:
@@ -90,6 +164,10 @@ class CoinFelloMCP:
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": PROTOCOL_VERSION,
+            # Our own name, not Python-urllib's: coinfello-web remembers per
+            # user-agent whether a client renders MCP App cards, and must not
+            # mistake this plugin for another Python client that does.
+            "User-Agent": f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']}",
         }
         if self.session_token:
             headers["Authorization"] = f"Bearer {self.session_token}"
@@ -147,7 +225,15 @@ class CoinFelloMCP:
     @staticmethod
     def _raise_rpc_error(message: dict, context: str):
         error = message.get("error") or {}
-        raise MCPError(f"{context}: {error.get('message') or error}")
+        text = f"{context}: {error.get('message') or error}"
+        readable = (
+            validation_message(str(error.get("message") or ""), error.get("code"))
+            if isinstance(error, dict) else None
+        )
+        if readable:
+            log.warning("CoinFello %s", text)
+            raise MCPError(readable, detail=text)
+        raise MCPError(text)
 
     # -- protocol ------------------------------------------------------------
 
@@ -164,6 +250,12 @@ class CoinFelloMCP:
                 "method": "initialize",
                 "params": {
                     "protocolVersion": PROTOCOL_VERSION,
+                    # Deliberately NOT advertising the MCP Apps extension
+                    # (io.modelcontextprotocol/ui): a server that sees it
+                    # sends card tools a headline instead of the full text,
+                    # and one plugin process serves desktop (card on screen)
+                    # and Telegram/CLI (no card) alike. Card results always
+                    # carry structuredContent, which is all the card needs.
                     "capabilities": {},
                     "clientInfo": CLIENT_INFO,
                 },
@@ -223,26 +315,55 @@ class CoinFelloMCP:
         result = (message or {}).get("result") or {}
         return result.get("tools") or []
 
-    def call_tool(self, name: str, arguments: dict | None = None, *, _retry: bool = True):
-        """Call a tool; returns the parsed JSON payload, or the plain text."""
+    def _call_tool_raw(self, name: str, arguments: dict | None, retry: bool) -> dict:
         self.ensure_initialized()
         try:
             message = self._rpc("tools/call", {"name": name, "arguments": dict(arguments or {})})
         except SessionExpired:
-            if not _retry:
+            if not retry:
                 raise
             self.initialize()
-            return self.call_tool(name, arguments, _retry=False)
+            return self._call_tool_raw(name, arguments, False)
         if message is None:
             raise MCPError(f"{name}: no response from server")
-        result = message.get("result") or {}
-        content = result.get("content") or []
-        text = "\n".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
+
+    @staticmethod
+    def _readable_refusal(name: str, result: dict) -> str | None:
+        """The readable form of an input-validation error result (logged in
+        full), or None for any other result."""
+        if not result.get("isError"):
+            return None
+        text = result_text(result)
+        readable = validation_message(text)
+        if readable:
+            log.warning("CoinFello %s refused its arguments: %s", name, text)
+        return readable
+
+    def call_tool_result(self, name: str, arguments: dict | None = None, *, _retry: bool = True) -> dict:
+        """Call a tool; returns the raw CallToolResult (``content``,
+        ``structuredContent``, ``isError``), without raising on ``isError``.
+
+        MCP App cards need the result exactly as the server sent it: the card
+        renders ``structuredContent`` and handles its own tool errors. The one
+        change: an input-validation error's text becomes its readable form
+        (see ``validation_message``), so no card shows the raw JSON.
+        """
+        result = self._call_tool_raw(name, arguments, _retry)
+        readable = self._readable_refusal(name, result)
+        if readable:
+            return {**result, "content": [{"type": "text", "text": readable}]}
+        return result
+
+    def call_tool(self, name: str, arguments: dict | None = None, *, _retry: bool = True):
+        """Call a tool; returns the parsed JSON payload, or the plain text."""
+        result = self._call_tool_raw(name, arguments, _retry)
+        text = result_text(result)
         if result.get("isError"):
+            readable = self._readable_refusal(name, result)
+            if readable:
+                raise ToolError(readable, detail=text)
             raise ToolError(text or f"{name}: tool reported an error without detail")
         if not text:
             return {}
@@ -250,3 +371,32 @@ class CoinFelloMCP:
             return json.loads(text)
         except ValueError:
             return text
+
+    def read_resource(self, uri: str) -> dict:
+        """Read one CoinFello MCP App card document (``resources/read``).
+
+        Only ``ui://coinfello/`` URIs, and only the MCP Apps HTML type: this
+        is the one kind of resource the plugin renders, and anything else
+        (another server's card, a plain web page) is refused before it could
+        reach a frame. Returns ``{"uri", "text", "_meta"}``.
+        """
+        if not isinstance(uri, str) or not uri.startswith(CARD_URI_PREFIX) or ".." in uri:
+            raise MCPError(f"refusing to read {uri!r}: only {CARD_URI_PREFIX} cards are rendered")
+        self.ensure_initialized()
+        try:
+            message = self._rpc("resources/read", {"uri": uri})
+        except SessionExpired:
+            self.initialize()
+            message = self._rpc("resources/read", {"uri": uri})
+        contents = ((message or {}).get("result") or {}).get("contents") or []
+        for item in contents:
+            if not isinstance(item, dict) or item.get("uri") != uri:
+                continue
+            if not is_card_mime(item.get("mimeType")):
+                raise MCPError(f"{uri} is {item.get('mimeType')!r}, not an MCP App card")
+            text = item.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise MCPError(f"{uri} has no HTML")
+            meta = item.get("_meta")
+            return {"uri": uri, "text": text, "_meta": meta if isinstance(meta, dict) else {}}
+        raise MCPError(f"{uri}: the server returned no card document")

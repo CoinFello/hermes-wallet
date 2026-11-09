@@ -64,6 +64,15 @@ def recall_intent(intent_id: str) -> dict | None:
     return entry["summary"]
 
 
+def intent_seconds_left(intent_id: str) -> int:
+    """Seconds until a cached intent stops being executable (0 when gone)."""
+    with _intents_lock:
+        entry = _intents.get(intent_id)
+    if not entry:
+        return 0
+    return max(0, int(entry["expires"] - time.monotonic()))
+
+
 def forget_intent(intent_id: str) -> None:
     with _intents_lock:
         _intents.pop(intent_id, None)
@@ -145,12 +154,12 @@ def prepare_swap(args: dict) -> dict:
         "from_chain_id": int(args.get("from_chain_id") or 0),
         "from_token": str(args.get("from_token") or "").strip(),
         "to_token": str(args.get("to_token") or "").strip(),
-        "amount": str(args.get("amount") or "").strip(),
     }
     if not payload["from_chain_id"]:
         raise ValueError("from_chain_id is required")
-    if not payload["from_token"] or not payload["to_token"] or not payload["amount"]:
-        raise ValueError("from_token, to_token and amount are required")
+    if not payload["from_token"] or not payload["to_token"]:
+        raise ValueError("from_token and to_token are required")
+    payload["amount"] = core.normalize_amount(args.get("amount"))
     if args.get("to_chain_id"):
         payload["to_chain_id"] = int(args["to_chain_id"])
     if args.get("slippage") is not None:

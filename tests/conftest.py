@@ -9,6 +9,7 @@ session invalidation for the 404-retry path.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import time
@@ -117,6 +118,110 @@ EMBED_TOKEN = {
 }
 
 
+# MCP App cards ------------------------------------
+
+CARD_MIME = "text/html;profile=mcp-app"
+MODEL_NOTE = (
+    "Model note: the host shows the card above your reply, at this tool call. "
+    "The card is the list."
+)
+CARD_HTML = (
+    '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora">\n'
+    "</head>\n<body><div class=\"card\" id=\"root\"></div>"
+    "<script>parent.postMessage({jsonrpc: '2.0', id: 1, method: 'ui/initialize'}, '*')</script>"
+    "</body>\n</html>"
+)
+CARD_RESOURCE_META = {"ui": {"prefersBorder": True, "csp": {"resourceDomains": [
+    "https://fonts.googleapis.com", "https://fonts.gstatic.com",
+    "http://insecure.test", "https://evil.test; script-src *", 42,
+]}}}
+RETRYABLE = {"get_balances", "get_positions", "prepare_swap", "whoami"}
+
+
+def _ui_meta(uri, *, flat_only=False):
+    meta = {"ui/resourceUri": uri}
+    if not flat_only:
+        meta["ui"] = {"resourceUri": uri, "visibility": ["model", "app"]}
+    return meta
+
+
+def _props(*names, required=()):
+    schema = {"type": "object", "properties": {name: {"type": "string"} for name in names}}
+    if required:
+        schema["required"] = list(required)
+    return schema
+
+
+CARD_TOOLS = [
+    {"name": "show_portfolio_card", "inputSchema": _props("chain_ids", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/portfolio-card.html")},
+    {"name": "show_quote_card", "inputSchema": _props("intent_id", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/quote-card.html")},
+    {"name": "show_error_card", "inputSchema": _props("kind", "message", "retry_tool", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/error-card.html")},
+    {"name": "show_automations_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://coinfello/automations-card.html")},
+    # Only the deprecated flat key, like hosts before the MCP Apps rename.
+    # Requires its token, like the live server (and a session token the
+    # plugin sends as a header instead).
+    {"name": "show_yield_card", "inputSchema": _props("token", "chain_ids", "session_token",
+                                                      required=("token", "session_token")),
+     "_meta": _ui_meta("ui://coinfello/yield-card.html", flat_only=True)},
+    # Declares a card URI the plugin does not know: never drawn.
+    # The typed-yield-id deposit card, which desktop replaces with the Earn view.
+    {"name": "show_earn_deposit_card", "inputSchema": _props("yield_id", "amount", "session_token"),
+     "_meta": _ui_meta("ui://coinfello/earn-deposit-card.html")},
+    {"name": "show_status_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://elsewhere/status-card.html")},
+    {"name": "show_sign_in_card", "inputSchema": _props("session_token"),
+     "_meta": _ui_meta("ui://coinfello/sign-in-card.html")},
+    {"name": "pause_automation", "inputSchema": _props("trigger_id", "session_token")},
+    {"name": "cancel_automation", "inputSchema": _props("trigger_id", "session_token")},
+    {"name": "get_positions", "inputSchema": _props("session_token")},
+]
+CARD_TRADE_SCHEMAS = {
+    "prepare_swap": _props("from_chain_id", "from_token", "to_chain_id", "to_token", "amount", "slippage", "session_token"),
+    "prepare_send": _props("chain_id", "token", "amount", "recipient", "session_token"),
+    "execute_intent": _props("intent_id", "session_token"),
+    "get_balances": _props("chain_ids", "session_token"),
+}
+AUTOMATION_ROWS = [
+    {"id": "trg-1", "name": "Weekly ETH", "summary": "Buys $10 of ETH every week", "whyPaused": None},
+]
+
+
+def _card_result(text, data):
+    return {"content": [{"type": "text", "text": f"{MODEL_NOTE}\n{text}"}], "structuredContent": data}
+
+
+def _card_tool(name, arguments):
+    """The mock's show_*_card answers, or None for any other tool."""
+    if name == "show_portfolio_card":
+        return _card_result(
+            "Portfolio: $2,500.00\nUSDC on Base: $1,000.00\nETH on Ethereum: $1,500.00",
+            {"totalValueUsd": 2500.0, "session_token": "tok-leaked",
+             "nested": {"embedToken": "cfemb_leaked", "token": "USDC"}},
+        )
+    if name == "show_quote_card":
+        return _card_result("Bridge 0.004186 ETH to POL.", {"kind": "bridge", "intentId": arguments.get("intent_id")})
+    if name == "show_error_card":
+        retry = arguments.get("retry_tool")
+        return _card_result("Network did not answer.", {
+            "kind": "network", "retryTool": retry if retry in RETRYABLE else None, "retryArgs": {}})
+    if name == "show_automations_card":
+        return _card_result("1 open automation.\nWeekly ETH", {"rows": AUTOMATION_ROWS, "note": None})
+    if name == "show_earn_deposit_card":
+        return _card_result("Deposit into a yield: enter its id.", {"yieldId": arguments.get("yield_id")})
+    if name in ("show_yield_card", "show_status_card", "show_sign_in_card"):
+        return _card_result(f"{name} text", {"rows": []})
+    if name in ("pause_automation", "cancel_automation"):
+        return _tool_result({"ok": True, "trigger_id": arguments.get("trigger_id")})
+    if name == "get_positions":
+        return _tool_result({"defi": []})
+    return None
+
+
 def _access_for(authorization, state):
     override = state.get("access_override", {}).get(authorization)
     if override is not None:
@@ -137,6 +242,22 @@ def _tool_result(payload, *, error=False):
 
 def _rpc_response(message_id, result):
     return {"jsonrpc": "2.0", "id": message_id, "result": result}
+
+
+#: Production's schema for a trade amount: a leading digit, no sign or exponent.
+SERVER_AMOUNT_RE = re.compile(r"^\d+(\.\d+)?$")
+
+
+def amount_refusal(tool):
+    """The text production sends when its schema refuses ``amount``, verbatim
+    (seen in the Hermes pane, 2026-11-09)."""
+    issues = [{
+        "origin": "string", "code": "invalid_format", "format": "regex",
+        "pattern": "/^\\d+(\\.\\d+)?$/", "path": ["amount"],
+        "message": 'A decimal number, e.g. "1.5"',
+    }]
+    return (f"MCP error -32602: Input validation error: Invalid arguments for tool {tool}: "
+            + json.dumps(issues, indent=2))
 
 
 class MockMCPHandler(BaseHTTPRequestHandler):
@@ -189,6 +310,14 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             self._handle_tool(message.get("id"), name, arguments)
             return
 
+        if method == "resources/read":
+            uri = (message.get("params") or {}).get("uri", "")
+            self.state["resource_reads"].append(uri)
+            item = {"uri": self.state["resource_uri_override"] or uri,
+                    "mimeType": self.state["resource_mime"], "text": CARD_HTML, "_meta": CARD_RESOURCE_META}
+            self._json(200, _rpc_response(message.get("id"), {"contents": [item]}))
+            return
+
         if method == "tools/list":
             self.state["list_calls"] += 1
             tools = [{"name": name, "inputSchema": {"type": "object"}} for name in BASE_TOOLS]
@@ -213,17 +342,29 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                                 "expected_email": {"type": "string"}}}
             if self.state["actions"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in ACTION_TOOLS]
+                scopes = self.state["embed_scopes"]
                 if self.state["portfolio_embed"]:
                     # coinfello-web /embed/portfolio: scope advertised as an enum.
+                    scopes = ("swap",) if scopes is None else scopes
+                    scopes = tuple(scopes) + (("portfolio",) if scopes and "portfolio" not in scopes else ())
+                if scopes is not None:
+                    # create_embed_token takes a scope: the Earn and/or the
+                    # portfolio embed's server. () = a scope with no enum.
+                    scope = {"type": "string"}
+                    if scopes:
+                        scope["enum"] = list(scopes)
                     for tool in tools:
                         if tool["name"] == "create_embed_token":
                             tool["inputSchema"] = {"type": "object", "properties": {
-                                "scope": {"type": "string", "enum": ["swap", "portfolio"]}}}
+                                "scope": scope, "session_token": {"type": "string"}}}
             if self.state["limit_mode"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}}
                           for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
             if self.state["transfer_status"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}} for name in STATUS_TOOLS]
+            if self.state["cards"]:
+                tools = [{**tool, "inputSchema": CARD_TRADE_SCHEMAS.get(tool["name"], tool["inputSchema"])}
+                         for tool in tools] + CARD_TOOLS
             self._json(200, _rpc_response(message.get("id"), {"tools": tools}))
             return
 
@@ -273,6 +414,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
 
     def _handle_tool(self, message_id, name, arguments):
         state = self.state
+        card = _card_tool(name, arguments) if state["cards"] else None
+        if card is not None:
+            self._json(200, _rpc_response(message_id, card))
+            return
         if name == "start_browser_sign_in" and state["browser_sign_in"]:
             self._json(200, _rpc_response(message_id, _tool_result(BROWSER_SIGN_IN)))
             return
@@ -290,9 +435,11 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if name in ("set_daily_limit", "start_limit_change", "get_limit_change") and state["limit_mode"]:
             self._limit_tool(message_id, name, arguments)
             return
+        browse_only = (name == "create_embed_token" and arguments.get("scope") == "earn"
+                       and state["earn_read_only_mint"])
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
                 and not (name == "create_embed_token" and arguments.get("scope") == "portfolio")
-                and state["access_mode"]
+                and state["access_mode"] and not browse_only
                 and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
             state["refused_read_only"].append(name)
             self._json(200, _rpc_response(message_id, _tool_result(
@@ -300,6 +447,17 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 "again with start_browser_sign_in and choose a daily limit on the "
                 "approval page. Email-code sign-in always gives a read-only session.",
                 error=True)))
+            return
+        if (name in ("prepare_send", "prepare_swap", "get_quote") and state["actions"]
+                and not SERVER_AMOUNT_RE.match(str(arguments.get("amount", "")))):
+            self._json(200, _rpc_response(message_id, _tool_result(amount_refusal(name), error=True)))
+            return
+        if name == "strict_rpc":
+            # An older SDK answers a schema refusal as a JSON-RPC error instead.
+            self._json(200, {"jsonrpc": "2.0", "id": message_id, "error": {
+                "code": -32602,
+                "message": amount_refusal(name).removeprefix("MCP error -32602: "),
+            }})
             return
         if name == "prepare_send" and state["actions"]:
             if not str(arguments.get("recipient", "")).startswith("0x"):
@@ -352,7 +510,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                     dict(EMBED_TOKEN, embed_token="cfemb_portfolio",
                          embed_url="https://app.coinfello.test/embed/portfolio"))))
                 return
-            self._json(200, _rpc_response(message_id, _tool_result(EMBED_TOKEN)))
+            minted = dict(EMBED_TOKEN)
+            if arguments.get("scope") == "earn":
+                minted.update(embed_token="cfemb_earn", embed_url="https://app.coinfello.test/embed/earn")
+            self._json(200, _rpc_response(message_id, _tool_result(minted)))
             return
         if name == "expire_session":
             state["session_id"] = f"sess-{state['generation'] + 1}"
@@ -482,7 +643,17 @@ def mock_mcp(monkeypatch):
         "price_moved": False,
         "route_changed": False,
         "outcome_unknown": False,
+        # The Earn embed: None = create_embed_token without `scope` (production
+        # before it ships); a list = `scope` with that enum; () = no enum.
+        "embed_scopes": None,
+        # The server mints Earn tokens for read-only sessions (browse only).
+        "earn_read_only_mint": False,
         "transfer_status": False,
+        # MCP App cards: show_*_card tools with _meta.ui and resources/read.
+        "cards": False,
+        "resource_reads": [],
+        "resource_mime": CARD_MIME,
+        "resource_uri_override": "",
     }
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

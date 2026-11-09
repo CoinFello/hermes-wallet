@@ -14,11 +14,13 @@ human-approval gate, so a model cannot trade without a person approving it.
 from __future__ import annotations
 
 try:
+    from . import coinfello_cards as _cards
     from . import coinfello_tools as _t
     from . import coinfello_trades as _trades
 except ImportError:  # pragma: no cover
     # Imported without a parent package (e.g. pytest walking the repo root).
     # Hermes itself always loads this file as the ``coinfello`` package.
+    _cards = None
     _t = None
     _trades = None
 
@@ -33,6 +35,9 @@ def register(ctx) -> None:
             "coinfello: loaded outside its package; install as "
             "~/.hermes/plugins/coinfello/"
         )
+    # coinfello_show_card asks which client the turn runs in (desktop draws
+    # the card in the pane; other surfaces get its text).
+    _cards.bind_host(ctx)
     for name, schema, handler in _t.TOOLS:
         ctx.register_tool(
             name=name,

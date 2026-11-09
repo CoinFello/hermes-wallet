@@ -1,0 +1,38 @@
+{
+  "_comment": "One table for both amount normalizers: coinfello_core.normalize_amount (tests/test_amounts.py) and desktop/plugin.js normalizeAmount (tests/amount.test.mjs). [input, normalized] or [input, null, error].",
+  "valid": [
+    [".001", "0.001"],
+    ["0.001", "0.001"],
+    ["1.", "1"],
+    ["1", "1"],
+    [" 2.5 ", "2.5"],
+    ["\t0.25\n", "0.25"],
+    ["007.50", "7.5"],
+    ["1.000", "1"],
+    ["100", "100"],
+    ["0.000000000000000001", "0.000000000000000001"],
+    ["123456789012345678901234567890.123456789012345678", "123456789012345678901234567890.123456789012345678"]
+  ],
+  "invalid": [
+    ["", "Enter an amount like 0.001"],
+    ["   ", "Enter an amount like 0.001"],
+    [".", "Enter an amount like 0.001"],
+    ["abc", "Enter an amount like 0.001"],
+    ["1.5 ETH", "Enter an amount like 0.001"],
+    ["-1", "Enter an amount like 0.001"],
+    ["+1", "Enter an amount like 0.001"],
+    ["1e5", "Enter an amount like 0.001"],
+    ["1E-3", "Enter an amount like 0.001"],
+    ["1.2.3", "Enter an amount like 0.001"],
+    ["1,000", "Enter an amount like 0.001"],
+    ["1 000", "Enter an amount like 0.001"],
+    ["0x10", "Enter an amount like 0.001"],
+    ["Infinity", "Enter an amount like 0.001"],
+    ["NaN", "Enter an amount like 0.001"],
+    ["١", "Enter an amount like 0.001"],
+    ["0", "Enter an amount greater than 0"],
+    ["0.", "Enter an amount greater than 0"],
+    [".0", "Enter an amount greater than 0"],
+    ["000.000", "Enter an amount greater than 0"]
+  ]
+}

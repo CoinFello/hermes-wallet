@@ -12,9 +12,11 @@ from typing import Any, Callable
 from tools.registry import tool_error, tool_result
 
 try:  # package import inside Hermes; plain import in tests
+    from . import coinfello_cards as cards
     from . import coinfello_core as core
     from . import coinfello_trades as trades
 except ImportError:  # pragma: no cover
+    import coinfello_cards as cards  # type: ignore[no-redef]
     import coinfello_core as core  # type: ignore[no-redef]
     import coinfello_trades as trades  # type: ignore[no-redef]
 
@@ -52,22 +54,35 @@ _TOKEN = lambda key: {  # noqa: E731
 }
 
 
+def _run(call: Callable[[], Any]) -> str:
+    try:
+        return tool_result(call())
+    except core.NotSignedIn as exc:
+        return tool_error(f"Not signed in to CoinFello. {exc}")
+    except core.NeedsTradingAccess as exc:
+        return tool_error(str(exc))
+    except core.ToolError as exc:
+        return tool_error(f"CoinFello: {exc}")
+    except core.MCPError as exc:
+        return tool_error(f"CoinFello MCP error: {exc}")
+    except (ValueError, RuntimeError) as exc:
+        return tool_error(str(exc))
+    except Exception as exc:  # plugin contract: never raise out
+        return tool_error(f"CoinFello tool failed: {type(exc).__name__}: {exc}")
+
+
 def _wrap(handler: Handler) -> Handler:
     def safe(args: dict) -> str:
-        try:
-            return tool_result(handler(args or {}))
-        except core.NotSignedIn as exc:
-            return tool_error(f"Not signed in to CoinFello. {exc}")
-        except core.NeedsTradingAccess as exc:
-            return tool_error(str(exc))
-        except core.ToolError as exc:
-            return tool_error(f"CoinFello: {exc}")
-        except core.MCPError as exc:
-            return tool_error(f"CoinFello MCP error: {exc}")
-        except (ValueError, RuntimeError) as exc:
-            return tool_error(str(exc))
-        except Exception as exc:  # plugin contract: never raise out
-            return tool_error(f"CoinFello tool failed: {type(exc).__name__}: {exc}")
+        return _run(lambda: handler(args or {}))
+
+    return safe
+
+
+def _wrap_with_session(handler: Callable[..., Any]) -> Callable[..., str]:
+    """Like ``_wrap``, taking the calling session's id from Hermes (which
+    passes the context keywords a handler's signature names)."""
+    def safe(args: dict, session_id: str = "", **_context: Any) -> str:
+        return _run(lambda: handler(args or {}, session_id=str(session_id or "")))
 
     return safe
 
@@ -133,12 +148,12 @@ def _quote(args: dict) -> Any:
         "from_chain_id": int(args.get("from_chain_id") or 0),
         "from_token": str(args.get("from_token") or "").strip(),
         "to_token": str(args.get("to_token") or "").strip(),
-        "amount": str(args.get("amount") or "").strip(),
     }
     if not payload["from_chain_id"]:
         raise ValueError("from_chain_id is required")
-    if not payload["from_token"] or not payload["to_token"] or not payload["amount"]:
-        raise ValueError("from_token, to_token and amount are required")
+    if not payload["from_token"] or not payload["to_token"]:
+        raise ValueError("from_token and to_token are required")
+    payload["amount"] = core.normalize_amount(args.get("amount"))
     if args.get("to_chain_id"):
         payload["to_chain_id"] = int(args["to_chain_id"])
     if args.get("slippage") is not None:
@@ -156,6 +171,16 @@ def _prepare_send(args: dict) -> Any:
 
 def _execute(args: dict) -> Any:
     return trades.execute(str(args.get("intent_id") or ""))
+
+
+def _show_card(args: dict, *, session_id: str = "") -> Any:
+    arguments = args.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        raise ValueError("arguments is an object of the card's own arguments, e.g. {\"token\": \"USDC\"}")
+    # Models often put the card's arguments beside ``card`` instead of inside
+    # ``arguments``; take those too, letting ``arguments`` win a clash.
+    stray = {key: value for key, value in args.items() if key not in ("card", "arguments")}
+    return cards.show_card(args.get("card"), {**stray, **(arguments or {})}, session_id=session_id)
 
 
 def _transfer_status(args: dict) -> Any:
@@ -517,7 +542,43 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
     ),
 )
 
-TOOLS = tuple((name, schema, _wrap(handler)) for name, schema, handler in _COINFELLO_TOOLS)
+_SHOW_CARD = (
+    "coinfello_show_card",
+    _schema(
+        "coinfello_show_card",
+        "Show a CoinFello card to the human. On Hermes desktop it is drawn in "
+        "the CoinFello pane beside the chat (not inline), live: Refresh, "
+        "fresh quotes and Confirm work on the card, and anything that moves "
+        "funds asks the human in the pane first. On other surfaces (Telegram, "
+        "CLI) no card can be drawn and you get the full text. Read `note` in "
+        "the result: it says which happened and how to reply. Use it after the "
+        "matching read or prepare, when a visual helps: portfolio, status, "
+        "yield ({\"token\": \"USDC\"}), lp_ranges, perp, automations, needs_you, "
+        "fund; quote with {\"intent_id\"} from coinfello_prepare_swap / "
+        "_prepare_send; error with {\"kind\" or \"message\", \"retry_tool\"}. "
+        "To deposit into a yield, earn_deposit: on desktop it opens CoinFello's "
+        "Earn view in the pane, where the human browses yields, picks one and "
+        "deposits; optionally preselect {\"opportunity\": <yield id>} or "
+        "{\"token\": \"USDC\", \"chain_id\": 8453}. "
+        "Those objects go inside `arguments`, not beside `card`. "
+        "Executes nothing itself.",
+        {
+            "card": {"type": "string", "enum": cards.card_names(), "description": "Which card"},
+            "arguments": {
+                "type": "object",
+                "description": (
+                    "The card's own arguments, nested here (omit for none). A whole "
+                    "call: {\"card\": \"yield\", \"arguments\": {\"token\": \"USDC\", \"chain_ids\": [8453]}}. "
+                    "Only the ones the server declares are sent."
+                ),
+            },
+        },
+        ("card",),
+    ),
+    _wrap_with_session(_show_card),
+)
+
+TOOLS = tuple((name, schema, _wrap(handler)) for name, schema, handler in _COINFELLO_TOOLS) + (_SHOW_CARD,)
 
 
 def available() -> bool:

@@ -163,6 +163,24 @@ def test_send_validation_errors_fold_into_ok_false(client, mock_mcp):
     assert "0x address" in bad.json()["error"]
 
 
+def test_send_amounts_over_http(client, mock_mcp, monkeypatch):
+    mock_mcp.mock_state["actions"] = True
+    client.post(f"{BASE}/connect", json={"email": "user@example.com"})
+    client.post(f"{BASE}/verify", json={"email": "user@example.com", "code": "111111"})
+    body = {"chain_id": 8453, "token": "0xUSDC", "recipient": "0x1111111111111111111111111111111111111111"}
+
+    assert client.post(f"{BASE}/send/prepare", json={**body, "amount": ".001"}).json()["ok"] is True
+    assert mock_mcp.mock_state["tool_calls"][-1][1]["amount"] == "0.001"
+
+    letters = client.post(f"{BASE}/send/prepare", json={**body, "amount": "abc"}).json()
+    assert letters == {"ok": False, "error": "Enter an amount like 0.001"}
+
+    # A server refusal the normalizer did not foresee: words, not the JSON.
+    monkeypatch.setattr(core, "normalize_amount", lambda value: str(value))
+    refused = client.post(f"{BASE}/send/prepare", json={**body, "amount": ".001"}).json()
+    assert refused == {"ok": False, "error": 'amount: A decimal number, e.g. "1.5"'}
+
+
 def test_limit_routes_over_http(client, mock_mcp):
     mock_mcp.mock_state.update(browser_sign_in=True, actions=True, access_mode=True, limit_mode=True)
     core.save_state({"session_token": "tok-trade", "wallet_address": "0xWALLET"})
