@@ -88,9 +88,9 @@ never in `config.yaml`.
   open them): they always show this plugin's account, with no browser,
   cookies or wallet extension involved. Strategies is for browsing the
   catalog, a strategy's details and what is running; to start one, ask the
-  agent. On servers without a view, its link opens in the browser with a
-  note to dismiss any wallet-extension prompt (the web app reconnects
-  extension wallets, which can sign in as a different account).
+  agent. On servers without a view, its pill says "Coming to Hermes soon"
+  and opens nothing: the browser is not a fallback, because the web app
+  reconnects extension wallets, which can sign in as a different account.
   A read-only session or a pending allowance change shows one notice that
   opens Settings.
 - **Settings:** the trading allowance (daily limit, what's left in the last

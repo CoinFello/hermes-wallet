@@ -209,6 +209,9 @@ const STYLES = `
 .cf-link { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--ui-stroke-tertiary); background: transparent; color: var(--ui-text-secondary); font-size: 12px; }
 .cf-link:hover { background: var(--chrome-action-hover); color: var(--ui-text-primary); }
+.cf-link.is-soon { cursor: default; color: var(--ui-text-tertiary); border-style: dashed; }
+.cf-link.is-soon:hover { background: transparent; color: var(--ui-text-tertiary); }
+.cf-soon { font-size: 10.5px; color: var(--ui-text-quaternary); }
 
 .cf-subhead { display: flex; align-items: center; gap: 6px; min-height: 28px; }
 .cf-subhead-title { font-size: 14px; font-weight: 600; }
@@ -360,6 +363,16 @@ function ExternalButton({ ctx, url, label, icon }) {
     children: jsxs(Fragment, {
       children: [jsx(Codicon, { name: icon || 'link-external', size: 12 }), label],
     }),
+  })
+}
+
+/** A view not available in Hermes yet: shown, not clickable, with why. */
+function SoonPill({ label, note }) {
+  return jsxs('span', {
+    className: 'cf-link is-soon',
+    'aria-disabled': true,
+    title: note,
+    children: [label, jsx('span', { className: 'cf-soon', children: note })],
   })
 }
 
@@ -612,7 +625,11 @@ function Assets({ ctx, tab, setTab }) {
   const tabs = canOpenTabs()
   const portfolioInApp = tabs && data.can_view_portfolio === true
   const strategiesInApp = tabs && data.can_view_strategies === true
-  const inBrowser = [!portfolioInApp && 'Full portfolio', !strategiesInApp && 'Strategies'].filter(Boolean)
+  // No browser fallback: the web app reconnects a browser-extension wallet and
+  // can sign in as a different account. Until the server offers a view, its
+  // pill says it is coming. A server that offers it to a desktop too old for
+  // main-area tabs says to update Hermes instead.
+  const soon = (offered) => (offered && !tabs ? 'Update Hermes to open this' : 'Coming to Hermes soon')
   return jsxs('section', {
     className: 'cf-section',
     id: 'cf-panel-assets',
@@ -695,19 +712,12 @@ function Assets({ ctx, tab, setTab }) {
         children: [
           portfolioInApp
             ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'portfolio'), label: 'Full portfolio' })
-            : jsx(LinkPill, { ctx, url: data.portfolio_url, label: 'Full portfolio' }),
+            : jsx(SoonPill, { label: 'Full portfolio', note: soon(data.can_view_portfolio === true) }),
           strategiesInApp
             ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'strategies'), label: 'Strategies' })
-            : jsx(LinkPill, { ctx, url: data.strategies_url, label: 'Strategies' }),
+            : jsx(SoonPill, { label: 'Strategies', note: soon(data.can_view_strategies === true) }),
         ],
       }),
-      inBrowser.length
-        ? jsx('div', {
-            className: 'cf-hint',
-            style: { padding: '0 2px' },
-            children: `${inBrowser.length === 2 ? 'These open' : `${inBrowser[0]} opens`} in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.`,
-          })
-        : null,
     ],
   })
 }
