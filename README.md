@@ -290,7 +290,11 @@ installs. Signing out ends the session; the plugin keeps no other identifier.
 
 Other network calls: token and network icons from MetaMask's icon service
 (`static.cx.metamask.io`) and CoinFello's site, LI.FI's status API for older
-servers' bridge status, and block explorers you choose to open.
+servers' bridge status, and block explorers you choose to open. CoinFello's
+cards (see Cards) load their fonts from Google Fonts (`fonts.googleapis.com`,
+`fonts.gstatic.com`), the only outside hosts a card's CSP allows, so Google
+sees your IP address and the font request when a card is drawn; cards have no
+other network access.
 
 ## Development
 
