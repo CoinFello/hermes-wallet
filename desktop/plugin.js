@@ -363,6 +363,16 @@ function ExternalButton({ ctx, url, label, icon }) {
   })
 }
 
+/** Opens a view in a Hermes tab (the counterpart of LinkPill's browser link). */
+function TabPill({ onClick, label }) {
+  return jsxs('button', {
+    type: 'button',
+    className: 'cf-link',
+    onClick,
+    children: [label, jsx(Codicon, { name: 'arrow-right', size: 11 })],
+  })
+}
+
 function LinkPill({ ctx, url, label }) {
   if (!url) return null
   return jsxs('button', {
@@ -599,7 +609,10 @@ function Assets({ ctx, tab, setTab }) {
   if (!data || data.ok === false) return null
   const networks = data.networks || []
   const appOrigin = originOf(data.portfolio_url)
-  const inApp = data.can_view_portfolio === true && canOpenTabs()
+  const tabs = canOpenTabs()
+  const portfolioInApp = tabs && data.can_view_portfolio === true
+  const strategiesInApp = tabs && data.can_view_strategies === true
+  const inBrowser = [!portfolioInApp && 'Full portfolio', !strategiesInApp && 'Strategies'].filter(Boolean)
   return jsxs('section', {
     className: 'cf-section',
     id: 'cf-panel-assets',
@@ -680,24 +693,21 @@ function Assets({ ctx, tab, setTab }) {
       jsxs('div', {
         className: 'cf-links',
         children: [
-          inApp
-            ? jsxs('button', {
-                type: 'button',
-                className: 'cf-link',
-                onClick: () => openPortfolioTab(ctx, appOrigin),
-                children: ['Full portfolio', jsx(Codicon, { name: 'arrow-right', size: 11 })],
-              })
+          portfolioInApp
+            ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'portfolio'), label: 'Full portfolio' })
             : jsx(LinkPill, { ctx, url: data.portfolio_url, label: 'Full portfolio' }),
-          jsx(LinkPill, { ctx, url: data.strategies_url, label: 'Strategies' }),
+          strategiesInApp
+            ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'strategies'), label: 'Strategies' })
+            : jsx(LinkPill, { ctx, url: data.strategies_url, label: 'Strategies' }),
         ],
       }),
-      jsx('div', {
-        className: 'cf-hint',
-        style: { padding: '0 2px' },
-        children: inApp
-          ? 'Strategies opens in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.'
-          : 'These open in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.',
-      }),
+      inBrowser.length
+        ? jsx('div', {
+            className: 'cf-hint',
+            style: { padding: '0 2px' },
+            children: `${inBrowser.length === 2 ? 'These open' : `${inBrowser[0]} opens`} in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.`,
+          })
+        : null,
     ],
   })
 }
@@ -1315,7 +1325,7 @@ const EMBEDS = {
     sessionEnded: 'Your CoinFello session ended. Sign in again, then reopen Earn.',
     reloaded: 'The Earn view reloaded. Reopen it to continue.',
   },
-  // Read-only: no result message. Opens in a main-area tab (PortfolioWorkspace).
+  // Read-only: no result message. Opens in a main-area tab (EmbedWorkspace).
   portfolio: {
     scope: 'portfolio',
     path: '/embed/portfolio',
@@ -1325,6 +1335,17 @@ const EMBEDS = {
     mintError: 'Could not open Portfolio',
     sessionEnded: 'Your CoinFello session ended. Sign in again, then reopen Portfolio.',
     reloaded: 'The Portfolio view reloaded. Reopen it to continue.',
+  },
+  // Read-only too: browse the catalog, a strategy's details, what is running.
+  strategies: {
+    scope: 'strategies',
+    path: '/embed/strategies',
+    resultType: '',
+    title: 'Strategies',
+    frameTitle: 'CoinFello strategies',
+    mintError: 'Could not open Strategies',
+    sessionEnded: 'Your CoinFello session ended. Sign in again, then reopen Strategies.',
+    reloaded: 'The Strategies view reloaded. Reopen it to continue.',
   },
 }
 
@@ -1619,14 +1640,19 @@ function useEarnRequests(ctx, enabled, open) {
 // The embed shows this plugin's own account: a 15-minute, read-only,
 // portfolio-scoped token, no cookies, no wallet connection.
 
-const PORTFOLIO_TAB_ID = 'coinfello-portfolio'
-let closePortfolioTab = null
+// Read-only views that open as a main-area tab, one tab per kind.
+const TABS = {
+  portfolio: { id: 'coinfello-portfolio', title: 'CoinFello portfolio' },
+  strategies: { id: 'coinfello-strategies', title: 'CoinFello strategies' },
+}
+const closeTab = {}
 
-function PortfolioWorkspace({ ctx, appUrl }) {
+function EmbedWorkspace({ ctx, appUrl, kind }) {
+  const embed = EMBEDS[kind]
   const frameRef = useRef(null)
   const [mount, setMount] = useState(0)
   const [dark] = useState(() => document.documentElement.classList.contains('dark'))
-  const { error, setError } = useEmbedHost({ ctx, kind: 'portfolio', frameRef, mount })
+  const { error, setError } = useEmbedHost({ ctx, kind, frameRef, mount })
   const reopen = () => {
     setError('')
     setMount(mount + 1)
@@ -1641,13 +1667,13 @@ function PortfolioWorkspace({ ctx, appUrl }) {
         children: [
           jsxs('div', {
             className: 'flex items-center gap-2',
-            children: [jsx(Logo, {}), jsx('span', { className: 'cf-subhead-title', children: 'Portfolio' })],
+            children: [jsx(Logo, {}), jsx('span', { className: 'cf-subhead-title', children: embed.title })],
           }),
           jsx('button', {
             type: 'button',
             className: 'cf-icon-btn',
             title: 'Reload',
-            'aria-label': 'Reload portfolio',
+            'aria-label': `Reload ${embed.title.toLowerCase()}`,
             onClick: reopen,
             children: jsx(Codicon, { name: 'refresh', size: 15 }),
           }),
@@ -1657,8 +1683,8 @@ function PortfolioWorkspace({ ctx, appUrl }) {
       jsx(SandboxedFrame, {
         key: mount,
         ref: frameRef,
-        src: embedFrameSrc({ appUrl, path: EMBEDS.portfolio.path, theme: dark ? 'dark' : 'light' }),
-        title: EMBEDS.portfolio.frameTitle,
+        src: embedFrameSrc({ appUrl, path: embed.path, theme: dark ? 'dark' : 'light' }),
+        title: embed.frameTitle,
         sandbox: 'allow-scripts allow-forms',
         style: { flex: 1, width: '100%', minHeight: 0, border: 0 },
       }),
@@ -1669,21 +1695,23 @@ function PortfolioWorkspace({ ctx, appUrl }) {
 /** True when this desktop can dock a plugin tab into the main area. */
 const canOpenTabs = () => typeof host?.openWorkspace === 'function'
 
-function openPortfolioTab(ctx, appUrl) {
-  closePortfolioTab = host.openWorkspace(PORTFOLIO_TAB_ID, {
-    title: 'CoinFello portfolio',
+function openEmbedTab(ctx, appUrl, kind) {
+  const tab = TABS[kind]
+  closeTab[kind] = host.openWorkspace(tab.id, {
+    title: tab.title,
     minWidth: '420px',
-    render: () => jsx(PortfolioWorkspace, { ctx, appUrl }),
+    render: () => jsx(EmbedWorkspace, { ctx, appUrl, kind }),
     onClose: () => {
-      closePortfolioTab = null
+      delete closeTab[kind]
     },
   })
 }
 
-function closePortfolio() {
-  if (closePortfolioTab) {
-    const close = closePortfolioTab
-    closePortfolioTab = null
+/** Sign-out closes every tab: they show the account that just left. */
+function closeEmbedTabs() {
+  for (const kind of Object.keys(closeTab)) {
+    const close = closeTab[kind]
+    delete closeTab[kind]
     close()
   }
 }
@@ -2840,7 +2868,7 @@ function Pane({ ctx }) {
     })
     setView({ kind: 'home' })
     setAllowanceMessage('')
-    closePortfolio()
+    closeEmbedTabs()
     try {
       await ctx.rest('/disconnect', { method: 'POST', body: {} })
     } finally {

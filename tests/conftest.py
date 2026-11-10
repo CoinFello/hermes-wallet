@@ -440,6 +440,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                     # coinfello-web /embed/portfolio: scope advertised as an enum.
                     scopes = ("swap",) if scopes is None else scopes
                     scopes = tuple(scopes) + (("portfolio",) if scopes and "portfolio" not in scopes else ())
+                if self.state["strategies_embed"]:
+                    # coinfello-web /embed/strategies: also in the enum.
+                    scopes = ("swap",) if scopes is None else scopes
+                    scopes = tuple(scopes) + (("strategies",) if scopes and "strategies" not in scopes else ())
                 if scopes is not None:
                     # create_embed_token takes a scope: the Earn and/or the
                     # portfolio embed's server. () = a scope with no enum.
@@ -535,7 +539,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         browse_only = (name == "create_embed_token" and arguments.get("scope") == "earn"
                        and state["earn_read_only_mint"])
         if (name in ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
-                and not (name == "create_embed_token" and arguments.get("scope") == "portfolio")
+                and not (name == "create_embed_token" and arguments.get("scope") in ("portfolio", "strategies"))
                 and state["access_mode"] and not browse_only
                 and _access_for(self.headers.get("Authorization"), state)["access"] == "read_only"):
             state["refused_read_only"].append(name)
@@ -606,6 +610,15 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 self._json(200, _rpc_response(message_id, _tool_result(
                     dict(EMBED_TOKEN, embed_token="cfemb_portfolio",
                          embed_url="https://app.coinfello.test/embed/portfolio"))))
+                return
+            if arguments.get("scope") == "strategies":
+                if not state["strategies_embed"]:
+                    self._json(200, _rpc_response(message_id, _tool_result(
+                        "scope: Invalid enum value. Expected 'swap'", error=True)))
+                    return
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    dict(EMBED_TOKEN, embed_token="cfemb_strategies",
+                         embed_url="https://app.coinfello.test/embed/strategies"))))
                 return
             minted = dict(EMBED_TOKEN)
             if arguments.get("scope") == "earn":
@@ -741,6 +754,7 @@ def mock_mcp(monkeypatch):
         # Older servers have no send/swap/embed tools.
         "actions": False,
         "portfolio_embed": False,
+        "strategies_embed": False,
         "used_intents": [],
         "price_moved": False,
         "route_changed": False,

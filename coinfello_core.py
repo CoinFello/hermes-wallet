@@ -799,6 +799,7 @@ def portfolio() -> dict:
     model["earn_supported"] = embeds_earn()
     model["earn_url"] = app_url("/earn")
     model["can_view_portfolio"] = supports_portfolio_embed()
+    model["can_view_strategies"] = supports_strategies_embed()
     return model
 
 
@@ -944,10 +945,19 @@ def explorer_url(transaction_hash: Any) -> str | None:
 
 
 #: The embedded views the pane hosts: scope -> its path on the app.
-EMBED_PATHS = {"swap": "/embed/swap", "earn": "/embed/earn", "portfolio": "/embed/portfolio"}
+EMBED_PATHS = {
+    "swap": "/embed/swap",
+    "earn": "/embed/earn",
+    "portfolio": "/embed/portfolio",
+    "strategies": "/embed/strategies",
+}
 EMBED_SCOPES = tuple(EMBED_PATHS)
+#: Views that only read: any session may open them, read-only ones included.
+READ_ONLY_EMBEDS = ("portfolio", "strategies")
 EARN_NEEDS_UPDATE = "Earn in Hermes needs a CoinFello server update."
 PORTFOLIO_NEEDS_UPDATE = "The in-app portfolio needs a CoinFello server update."
+STRATEGIES_NEEDS_UPDATE = "Strategies in Hermes needs a CoinFello server update."
+_READ_ONLY_NEEDS_UPDATE = {"portfolio": PORTFOLIO_NEEDS_UPDATE, "strategies": STRATEGIES_NEEDS_UPDATE}
 
 
 def embeds_earn() -> bool:
@@ -960,9 +970,20 @@ def embeds_earn() -> bool:
     return values is None or "earn" in values
 
 
+def supports_read_only_embed(scope: str) -> bool:
+    """True when the server mints this read-only view: its ``scope`` enum
+    lists it. A value an older server never advertised is never sent."""
+    return supports("create_embed_token") and accepts_value("create_embed_token", "scope", scope)
+
+
 def supports_portfolio_embed() -> bool:
     """coinfello-web's read-only /embed/portfolio (scope 'portfolio')."""
-    return supports("create_embed_token") and accepts_value("create_embed_token", "scope", "portfolio")
+    return supports_read_only_embed("portfolio")
+
+
+def supports_strategies_embed() -> bool:
+    """coinfello-web's read-only /embed/strategies (scope 'strategies')."""
+    return supports_read_only_embed("strategies")
 
 
 def embed_token(scope: str = "swap") -> dict:
@@ -970,19 +991,19 @@ def embed_token(scope: str = "swap") -> dict:
 
     Minted from the session server-side so the 30-day session token never
     reaches the renderer; the embed gets this 15-minute token, good only for
-    its own view (``swap``, ``earn`` or ``portfolio``).
+    its own view (``swap``, ``earn``, ``portfolio`` or ``strategies``).
 
     Swap moves funds: refused up front on a session known to be read-only,
     and ``scope`` is sent only to a server whose schema declares it. Earn is
     always asked of the server, which may mint one for browsing. The
-    portfolio view only reads, so it is minted with a plain call and only
-    from a server whose ``scope`` enum lists it.
+    portfolio and strategies views only read, so they are minted with a
+    plain call and only from a server whose ``scope`` enum lists them.
     """
     if scope not in EMBED_PATHS:
         raise ValueError(f"unknown embed scope {scope!r}: one of {', '.join(EMBED_PATHS)}")
-    if scope == "portfolio":
-        if not supports_portfolio_embed():
-            raise RuntimeError(PORTFOLIO_NEEDS_UPDATE)
+    if scope in READ_ONLY_EMBEDS:
+        if not supports_read_only_embed(scope):
+            raise RuntimeError(_READ_ONLY_NEEDS_UPDATE[scope])
         result = call("create_embed_token", {"scope": scope}, timeout=20.0)
     else:
         if not supports("create_embed_token"):

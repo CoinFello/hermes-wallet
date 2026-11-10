@@ -135,7 +135,7 @@ def intent_execute(body: IntentBody):
 class EmbedTokenBody(BaseModel):
     """Which embedded view the token is for; the pane's swap view sends none."""
 
-    scope: Literal["swap", "earn", "portfolio"] = "swap"
+    scope: Literal["swap", "earn", "portfolio", "strategies"] = "swap"
 
 
 EARN_READ_ONLY = (
