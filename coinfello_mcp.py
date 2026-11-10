@@ -18,7 +18,15 @@ import urllib.parse
 import urllib.request
 
 PROTOCOL_VERSION = "2025-06-18"
-CLIENT_INFO = {"name": "hermes-coinfello-plugin", "version": "0.1.0"}
+CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.2.0"}
+# Every request names the client the standard way. CoinFello's server reads it
+# for its own daily-activity analytics (the server is stateless, so it cannot
+# read clientInfo from initialize on later calls). Nothing else is sent for
+# analytics: no install id, no extra requests.
+USER_AGENT = (
+    f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']} "
+    "(Hermes; +https://github.com/CoinFello/coinfello-hermes-plugin)"
+)
 
 
 #: The only MCP App resources the plugin renders: CoinFello's own cards.
@@ -166,8 +174,9 @@ class CoinFelloMCP:
             "MCP-Protocol-Version": PROTOCOL_VERSION,
             # Our own name, not Python-urllib's: coinfello-web remembers per
             # user-agent whether a client renders MCP App cards, and must not
-            # mistake this plugin for another Python client that does.
-            "User-Agent": f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']}",
+            # mistake this plugin for another Python client that does. It is
+            # also the only client metadata CoinFello's usage analytics read.
+            "User-Agent": USER_AGENT,
         }
         if self.session_token:
             headers["Authorization"] = f"Bearer {self.session_token}"

@@ -272,6 +272,26 @@ window but the host's own frame are ignored; heights are clamped to
   after you approve the server's summary in Hermes.
 - Fast reads (`get_*`) are read-only.
 
+## Privacy and usage data
+
+The plugin sends no telemetry: no analytics SDK, no install id, no heartbeat
+or other request made only to be counted.
+
+It talks to CoinFello's MCP server (`https://app.coinfello.com/api/mcp`), and
+while the desktop pane is open it refreshes status and balances every 30-60
+seconds. Every request names the client in its `User-Agent`
+(`coinfello-hermes-plugin/<version> (Hermes; ...)`). **CoinFello records usage
+of its service on its servers**, under the
+[CoinFello privacy policy](https://coinfello.com/privacy-policy): at most once a day
+per signed-in session, an activity event with your CoinFello account id, the
+session's automation wallet address, the session id, and the client name and
+version. That is how CoinFello counts daily and monthly active users and
+installs. Signing out ends the session; the plugin keeps no other identifier.
+
+Other network calls: token and network icons from MetaMask's icon service
+(`static.cx.metamask.io`) and CoinFello's site, LI.FI's status API for older
+servers' bridge status, and block explorers you choose to open.
+
 ## Development
 
 ```bash

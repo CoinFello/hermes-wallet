@@ -121,3 +121,22 @@ def test_same_host_redirect_is_followed(mock_mcp):
     assert client._same_host_redirect(err) is None
     err302 = urllib.error.HTTPError(client.url, 302, "Found", headers, None)
     assert client._same_host_redirect(err302) is None
+
+
+def test_requests_name_the_plugin_and_its_manifest_version(mock_mcp):
+    """The User-Agent is the only client metadata CoinFello's activity
+    analytics read; it must match the version actually installed."""
+    import re
+    from pathlib import Path
+
+    import coinfello_mcp
+
+    manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
+    version = re.search(r"^version:\s*(\S+)", manifest, re.M).group(1)
+    assert coinfello_mcp.CLIENT_INFO["version"] == version
+    assert coinfello_mcp.USER_AGENT.startswith(f"coinfello-hermes-plugin/{version} ")
+
+    host, port = mock_mcp.server_address[:2]
+    client = coinfello_mcp.CoinFelloMCP(f"http://{host}:{port}/mcp", session_token="tok-live")
+    client.list_tools()
+    assert mock_mcp.mock_state["user_agents"][-1] == coinfello_mcp.USER_AGENT

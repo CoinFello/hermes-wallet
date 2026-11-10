@@ -25,7 +25,7 @@ import pytest
 import coinfello_cards as cards
 import coinfello_core as core
 import coinfello_trades as trades
-from coinfello_mcp import CoinFelloMCP, MCPError
+from coinfello_mcp import CLIENT_INFO, USER_AGENT, CoinFelloMCP, MCPError
 
 INTENT = "66666666-6666-6666-6666-666666666666"
 
@@ -205,7 +205,9 @@ def test_the_client_never_advertises_mcp_apps_and_names_itself(server):
     # Card tools then answer with their full text on every surface; the
     # plugin decides per surface what the model reads.
     client = _client(server)
-    assert client._headers()["User-Agent"] == "hermes-coinfello-plugin/0.1.0"
+    agent = client._headers()["User-Agent"]
+    assert agent == USER_AGENT and agent.startswith(f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']} ")
+    assert "python-urllib" not in agent.lower()
     sent = {}
     original = client._post
 

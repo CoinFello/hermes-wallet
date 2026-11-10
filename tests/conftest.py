@@ -321,6 +321,7 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             return
 
         method = message.get("method", "")
+        self.state["user_agents"].append(self.headers.get("User-Agent"))
         if method == "initialize":
             self.state["initialize_calls"] += 1
             self._json(
@@ -659,6 +660,7 @@ def mock_mcp(monkeypatch):
         "initialized_notices": 0,
         "tool_calls": [],
         "auth_headers": [],
+        "user_agents": [],
         "list_calls": 0,
         "sse_mode": False,
         # Servers deployed before browser sign-in offer neither of its tools;
