@@ -262,6 +262,57 @@ def _card_tool(name, arguments, state=None):
         return _tool_result({"defi": []})
     return None
 
+# coinfello-web lib/mcp/read_tools.ts readActivity: two independently read
+# sections, each {data} or {error}. Page 1 has a cursor; page 2 ends.
+ACTIVITY_PAGE_1 = {
+    "address": "0x1111111111111111111111111111111111111111",
+    "transactions": {"data": {
+        "entries": [
+            {"at": "2026-11-09T14:02:00Z", "status": "done", "actor": "fello", "automation": "Dip buyer",
+             "what": {"kind": "transaction", "verb": "swapped", "attempted": False, "protocol": "Uniswap",
+                      "counterparty": None, "moreCount": 1,
+                      "from": {"symbol": "USDC", "address": "0xa", "chainId": 8453, "amount": "50", "amountUsd": "50"},
+                      "to": {"symbol": "ETH", "address": "0xb", "chainId": 8453, "amount": "0.0161", "amountUsd": "49.9"}},
+             "result": {"kind": "amount", "flow": "exchange",
+                        "leg": {"symbol": "ETH", "address": "0xb", "chainId": 8453, "amount": "0.0161", "amountUsd": "49.9"}},
+             "chainId": 8453, "txHash": "0x" + "ab" * 32},
+            {"at": "2026-11-08T09:00:00Z", "status": "done", "actor": "incoming", "automation": None,
+             "what": {"kind": "transaction", "verb": "received", "attempted": False, "protocol": None,
+                      "counterparty": "0x2222222222222222222222222222222222222222", "moreCount": 0,
+                      "from": None,
+                      "to": {"symbol": "USDC", "address": "0xa", "chainId": 8453, "amount": "250", "amountUsd": "250"}},
+             "result": {"kind": "amount", "flow": "in",
+                        "leg": {"symbol": "USDC", "address": "0xa", "chainId": 8453, "amount": "250", "amountUsd": "250"}},
+             "chainId": 8453, "txHash": "0x" + "cd" * 32},
+        ],
+        "nextCursor": "cursor-2",
+        "incomplete": False,
+    }},
+    "hyperliquidFills": {"data": {"fills": [
+        {"at": "2026-11-09T10:00:00Z", "coin": "ETH", "side": "sell", "direction": "Close Long",
+         "price": "3120.4", "size": "0.5", "closedPnl": "12.3", "fee": "0.4", "feeToken": "USDC",
+         "orderId": 77, "txHash": "0x" + "ef" * 32, "liquidation": False},
+    ], "truncated": False}},
+}
+
+ACTIVITY_PAGE_2 = {
+    "address": "0x1111111111111111111111111111111111111111",
+    "transactions": {"data": {
+        "entries": [
+            {"at": "2026-11-10T09:00:00Z", "status": "failed", "actor": "you", "automation": None,
+             "what": {"kind": "transaction", "verb": "sent", "attempted": True, "protocol": None,
+                      "counterparty": "0x3333333333333333333333333333333333333333", "moreCount": 0,
+                      "from": {"symbol": "USDC", "address": "0xa", "chainId": 8453, "amount": "10", "amountUsd": "10"},
+                      "to": None},
+             "result": {"kind": "failed", "reason": {"code": "reverted"}},
+             "chainId": 8453, "txHash": "0x" + "12" * 32},
+        ],
+        "nextCursor": None,
+        "incomplete": False,
+    }},
+    "hyperliquidFills": {"error": "Hyperliquid fills did not answer within 20s"},
+}
+
 
 def _access_for(authorization, state):
     override = state.get("access_override", {}).get(authorization)
@@ -407,6 +458,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
             if self.state["cards"]:
                 tools = [{**tool, "inputSchema": CARD_TRADE_SCHEMAS.get(tool["name"], tool["inputSchema"])}
                          for tool in tools] + CARD_TOOLS
+            if self.state["activity"]:
+                tools.append({"name": "get_activity", "inputSchema": {"type": "object", "properties": {
+                    "before": {"type": "string"}, "chain_ids": {"type": "array"},
+                    "fills_since_hours": {"type": "integer"}}}})
             self._json(200, _rpc_response(message.get("id"), {"tools": tools}))
             return
 
@@ -603,6 +658,10 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                 payload.update(_access_for(self.headers.get("Authorization"), state))
             self._json(200, _rpc_response(message_id, _tool_result(payload)))
             return
+        if name == "get_activity":
+            page = ACTIVITY_PAGE_2 if arguments.get("before") == "cursor-2" else ACTIVITY_PAGE_1
+            self._json(200, _rpc_response(message_id, _tool_result(json.dumps(page))))
+            return
         if name == "get_balances":
             if state["sse_mode"]:
                 self._sse(message_id, _tool_result(BALANCES_TEXT))
@@ -699,6 +758,7 @@ def mock_mcp(monkeypatch):
         "resource_reads": [],
         "resource_mime": CARD_MIME,
         "resource_uri_override": "",
+        "activity": False,
     }
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -3,4 +3,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 .coinfello-state.json
+.coinfello-venues-*.json
 .DS_Store

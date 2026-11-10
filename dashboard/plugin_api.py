@@ -106,6 +106,11 @@ def portfolio():
     return _safe(core.portfolio)
 
 
+@router.get("/activity")
+def activity(before: Optional[str] = None):
+    return _safe(lambda: core.activity(before))
+
+
 class SendBody(BaseModel):
     chain_id: int
     token: str

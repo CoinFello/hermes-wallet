@@ -83,6 +83,10 @@ const STYLES = `
   height: 100%; overflow: auto; padding: 12px 12px 16px;
   font-family: var(--font-sans); font-size: 13px; color: var(--ui-text-primary);
 }
+/* The pane scrolls; its blocks never shrink to fit. As flex items they would:
+   the hero's overflow:hidden drops its min-height to 0, so a long Activity
+   list squashed the wallet card to a sliver instead of scrolling the pane. */
+.cf > * { flex-shrink: 0; }
 .cf button { font: inherit; }
 .cf.is-brand { --cf-accent: var(--cf-brand); --cf-accent-ink: var(--cf-brand-ink); }
 /* SDK primary buttons (bg-primary) follow the same choice. */
@@ -170,6 +174,37 @@ const STYLES = `
 .cf-token-value { text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
 .cf-token-change { text-align: right; }
 
+.cf-tabs { display: inline-flex; gap: 14px; }
+.cf-tab { position: relative; padding: 0 0 4px; border: 0; background: transparent; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--ui-text-tertiary); }
+.cf-tab:hover { color: var(--ui-text-secondary); }
+.cf-tab.is-active { color: var(--ui-text-primary); }
+.cf-tab.is-active::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 2px; background: var(--cf-accent); }
+.cf-tab:focus-visible { outline: 2px solid color-mix(in srgb, var(--cf-accent) 70%, var(--ui-text-primary)); outline-offset: 2px; border-radius: 3px; }
+
+.cf-act-day + .cf-act-day { margin-top: 6px; }
+.cf-act-day-label { font-weight: 600; color: var(--ui-text-primary); }
+.cf-act-row { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: start; gap: 9px; width: 100%;
+  padding: 7px 4px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; }
+.cf-act-row.is-link { cursor: pointer; }
+.cf-act-row.is-link:hover { background: var(--chrome-action-hover); }
+.cf-act-row.is-link:focus-visible { outline: 2px solid color-mix(in srgb, var(--cf-accent) 70%, var(--ui-text-primary)); outline-offset: -2px; }
+.cf-act-marker { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--ui-bg-quaternary); color: var(--ui-text-secondary); }
+.cf-act-marker.is-accent { background: color-mix(in srgb, var(--cf-accent) 22%, var(--ui-bg-quaternary)); color: var(--ui-text-primary); }
+.cf-act-marker.is-good { background: color-mix(in srgb, var(--ui-green) 18%, transparent); color: var(--ui-green); }
+.cf-act-marker.is-bad { background: color-mix(in srgb, var(--ui-red) 16%, transparent); color: var(--ui-red); }
+.cf-act-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--ui-text-tertiary); animation: cf-pulse 1.4s ease-in-out infinite; }
+.cf-act-marker.is-live .cf-act-pulse { background: var(--ui-green); }
+.cf-act-main { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.cf-act-sentence { font-size: 12.5px; line-height: 1.4; color: var(--ui-text-primary); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.cf-act-meta { font-size: 11px; color: var(--ui-text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-act-result { padding-top: 1px; font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.cf-err-text { color: var(--ui-red); }
+.cf-act-empty { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 22px 14px; text-align: center; color: var(--ui-text-tertiary); }
+.cf-act-empty-title { font-size: 13px; font-weight: 600; color: var(--ui-text-primary); }
+
 .cf-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .cf-link { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--ui-stroke-tertiary); background: transparent; color: var(--ui-text-secondary); font-size: 12px; }
@@ -236,7 +271,7 @@ const STYLES = `
 @keyframes cf-pulse { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
 .cf-skeleton { border-radius: 8px; background: var(--ui-bg-quaternary); animation: cf-pulse 1.4s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .cf-skeleton { animation: none; }
+  .cf-skeleton, .cf-act-pulse { animation: none; }
   .cf-action-icon, .cf-meter > span { transition: none; }
 }
 `
@@ -503,25 +538,75 @@ function AllowanceNotice({ status, message, onOpen }) {
   })
 }
 
-function Assets({ ctx }) {
+const HOME_TABS = [
+  { id: 'assets', label: 'Assets' },
+  { id: 'activity', label: 'Activity' },
+]
+
+/** Assets | Activity, as a tablist in the section-title style. */
+function HomeTabs({ tab, setTab, aside }) {
+  const onKeyDown = (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    const next = HOME_TABS[(HOME_TABS.findIndex((t) => t.id === tab) + 1) % HOME_TABS.length]
+    setTab(next.id)
+    event.currentTarget.parentElement?.querySelector(`[data-tab="${next.id}"]`)?.focus()
+  }
+  return jsxs('div', {
+    className: 'cf-section-head',
+    children: [
+      jsx('div', {
+        className: 'cf-tabs',
+        role: 'tablist',
+        'aria-label': 'Wallet',
+        children: HOME_TABS.map((t) =>
+          jsx(
+            'button',
+            {
+              type: 'button',
+              role: 'tab',
+              id: `cf-tab-${t.id}`,
+              'data-tab': t.id,
+              'aria-selected': tab === t.id,
+              'aria-controls': `cf-panel-${t.id}`,
+              tabIndex: tab === t.id ? 0 : -1,
+              className: cn('cf-tab', tab === t.id && 'is-active'),
+              onClick: () => setTab(t.id),
+              onKeyDown,
+              children: t.label,
+            },
+            t.id,
+          ),
+        ),
+      }),
+      aside ? jsx('span', { className: 'cf-section-aside', children: aside }) : null,
+    ],
+  })
+}
+
+function Assets({ ctx, tab, setTab }) {
   const portfolio = usePortfolio(ctx)
   const data = portfolio.data
+  if (tab === 'activity') {
+    return jsxs('section', {
+      className: 'cf-section',
+      children: [
+        jsx(HomeTabs, { tab, setTab }),
+        jsx('div', { id: 'cf-panel-activity', role: 'tabpanel', 'aria-labelledby': 'cf-tab-activity', className: 'cf-section', children: jsx(Activity, { ctx }) }),
+      ],
+    })
+  }
   if (!data || data.ok === false) return null
   const networks = data.networks || []
   const appOrigin = originOf(data.portfolio_url)
   const inApp = data.can_view_portfolio === true && canOpenTabs()
   return jsxs('section', {
     className: 'cf-section',
+    id: 'cf-panel-assets',
+    role: 'tabpanel',
+    'aria-labelledby': 'cf-tab-assets',
     children: [
-      jsxs('div', {
-        className: 'cf-section-head',
-        children: [
-          jsx('span', { className: 'cf-section-title', children: 'Assets' }),
-          networks.length
-            ? jsx('span', { className: 'cf-section-aside', children: `${networks.length} network${networks.length === 1 ? '' : 's'}` })
-            : null,
-        ],
-      }),
+      jsx(HomeTabs, { tab, setTab, aside: networks.length ? `${networks.length} network${networks.length === 1 ? '' : 's'}` : null }),
       networks.length === 0
         ? jsx('div', { className: 'cf-card cf-hint', children: 'No tokens yet. Use Receive to fund this wallet.' })
         : jsx('div', {
@@ -613,6 +698,312 @@ function Assets({ ctx }) {
           ? 'Strategies opens in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.'
           : 'These open in your browser. If a wallet extension asks to connect, cancel it and sign in with your email.',
       }),
+    ],
+  })
+}
+
+// -- activity: the wallet's history, worded like the CoinFello activity feed ----
+//
+// Rows arrive already worded (coinfello_activity.py ports the web app's
+// sentence/result rules). Pages follow the server's cursor; Hyperliquid fills
+// come only with the first page (the server reads them by time window), so
+// while older transactions remain unloaded, only fills inside the loaded span
+// are shown — otherwise a 6-day-old fill would sit above unloaded rows.
+
+// Custom 16px line icons where the codicon set has no fitting glyph, drawn in
+// its style (1.25 stroke, round caps) and coloured by currentColor.
+const ACTIVITY_ICONS = {
+  // Two opposed arrows: one token traded for another.
+  swap: '<path d="M2.5 5.5h10.5M10.5 3l2.5 2.5-2.5 2.5M13.5 10.5H3M5.5 8 3 10.5 5.5 13"/>',
+  // A key: a contract was given permission to spend a token.
+  allowance: '<circle cx="4.75" cy="8" r="3"/><path d="M7.75 8h6.75M12 8v2.5M14.5 8v2"/>',
+  // An arch bridge: funds moved from one network to another.
+  bridge: '<path d="M1 10h14M2 10Q8 2 14 10M5 7v3M8 6v4M11 7v3M3 10v3.5M13 10v3.5"/>',
+}
+
+function ActivityIcon({ name, size = 14 }) {
+  return jsx('svg', {
+    xmlns: 'http://www.w3.org/2000/svg',
+    width: size,
+    height: size,
+    viewBox: '0 0 16 16',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.25,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': true,
+    dangerouslySetInnerHTML: { __html: ACTIVITY_ICONS[name] },
+  })
+}
+
+// What happened -> its icon: { svg } names one of ACTIVITY_ICONS, { codicon }
+// a glyph from the app's icon font.
+const VERB_ICONS = {
+  swapped: { svg: 'swap' },
+  approved: { svg: 'allowance' },
+  bridged: { svg: 'bridge' },
+  sent: { codicon: 'arrow-up' },
+  received: { codicon: 'arrow-down' },
+  moved: { codicon: 'arrow-right' },
+  staked: { codicon: 'arrow-circle-down' },
+  lp_deposit: { codicon: 'arrow-circle-down' },
+  unstaked: { codicon: 'arrow-circle-up' },
+  lp_withdraw: { codicon: 'arrow-circle-up' },
+  executed: { codicon: 'code' },
+  run: { codicon: 'zap' },
+  fill: { codicon: 'graph-line' },
+}
+
+/**
+ * A failure, a run in progress and a pending transaction say so first.
+ * Otherwise the icon says WHAT happened and the tint says WHO: Fello's own
+ * actions keep the accent tint, money coming in is green.
+ */
+function markerOf(row) {
+  if (row.status === 'failed') return { codicon: 'error', tone: 'is-bad' }
+  if (row.status === 'running') return { tone: 'is-live' }
+  if (row.status === 'pending') return { tone: 'is-pending' }
+  const icon = VERB_ICONS[row.verb] || (row.actor === 'fello' ? VERB_ICONS.run : { codicon: 'circle-outline' })
+  const tone = row.actor === 'fello' ? 'is-accent' : row.actor === 'incoming' || row.verb === 'received' ? 'is-good' : ''
+  return { ...icon, tone }
+}
+
+const timeOf = (iso) => {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+}
+
+function dayLabel(iso, now = new Date()) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return 'Earlier'
+  const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const diff = Math.round((day(now) - day(date)) / 86400000)
+  if (diff === 0) return 'Today'
+  if (diff === 1) return 'Yesterday'
+  return date.toLocaleDateString(undefined, {
+    weekday: diff < 7 ? 'long' : undefined,
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() === now.getFullYear() ? undefined : 'numeric',
+  })
+}
+
+/** Page 1 + older pages + the fills inside the loaded span, newest first. */
+function activityTimeline(first, older) {
+  const pages = [first, ...older]
+  const seen = new Set()
+  const rows = []
+  for (const page of pages) {
+    for (const row of page.rows || []) {
+      if (seen.has(row.key)) continue
+      seen.add(row.key)
+      rows.push(row)
+    }
+  }
+  const last = pages[pages.length - 1]
+  const more = !!last.next_cursor
+  const oldest = rows.length ? Math.min(...rows.map((r) => Date.parse(r.at) || Infinity)) : -Infinity
+  const fills = (first.fills || []).filter((f) => !more || (Date.parse(f.at) || 0) >= oldest)
+  const all = [...rows, ...fills].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0))
+  const groups = []
+  for (const row of all) {
+    const label = dayLabel(row.at)
+    if (!groups.length || groups[groups.length - 1].label !== label) groups.push({ label, rows: [] })
+    groups[groups.length - 1].rows.push(row)
+  }
+  return { groups, count: all.length, cursor: last.next_cursor || null }
+}
+
+function ActivityRow({ ctx, row }) {
+  const marker = markerOf(row)
+  const meta = [row.source, timeOf(row.at), row.chain_name].filter(Boolean).join(' · ')
+  const resultClass = { positive: 'cf-up', negative: 'cf-down', error: 'cf-err-text' }[row.result && row.result.tone] || ''
+  const body = [
+    jsx(
+      'span',
+      {
+        className: cn('cf-act-marker', marker.tone),
+        title: row.status_label || undefined,
+        'aria-label': row.status_label || undefined,
+        children: marker.svg
+          ? jsx(ActivityIcon, { name: marker.svg })
+          : marker.codicon
+            ? jsx(Codicon, { name: marker.codicon, size: 13 })
+            : jsx('span', { className: 'cf-act-pulse' }),
+      },
+      'm',
+    ),
+    jsxs(
+      'span',
+      {
+        className: 'cf-act-main',
+        children: [
+          jsx('span', { className: 'cf-act-sentence', children: row.sentence }),
+          jsx('span', { className: 'cf-act-meta', children: row.status_label ? `${row.status_label} · ${meta}` : meta }),
+        ],
+      },
+      'b',
+    ),
+    jsx('span', { className: cn('cf-act-result', resultClass), children: row.result ? row.result.text : '' }, 'r'),
+  ]
+  return row.tx_url
+    ? jsx('button', {
+        type: 'button',
+        className: 'cf-act-row is-link',
+        title: 'Open the transaction in a block explorer',
+        onClick: () => ctx.os.openExternal(row.tx_url),
+        children: body,
+      })
+    : jsx('div', { className: 'cf-act-row', children: body })
+}
+
+function ActivitySkeleton() {
+  return jsx('div', {
+    className: 'cf-card',
+    style: { padding: 10 },
+    'aria-busy': true,
+    'aria-label': 'Loading activity',
+    children: [0, 1, 2].map((i) =>
+      jsxs(
+        'div',
+        {
+          className: 'cf-act-row',
+          children: [
+            jsx('span', { className: 'cf-act-marker cf-skeleton' }),
+            jsxs('span', {
+              className: 'cf-act-main',
+              children: [
+                jsx('span', { className: 'cf-skeleton', style: { width: '85%', height: 11 } }),
+                jsx('span', { className: 'cf-skeleton', style: { width: '45%', height: 9, marginTop: 5 } }),
+              ],
+            }),
+          ],
+        },
+        i,
+      ),
+    ),
+  })
+}
+
+function Activity({ ctx }) {
+  const query = useQuery({
+    queryKey: ['coinfello', 'activity'],
+    queryFn: () => ctx.rest('/activity', { timeoutMs: 60 * 1000 }),
+    refetchInterval: 60 * 1000,
+    staleTime: 20 * 1000,
+  })
+  const [older, setOlder] = useState([])
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [olderError, setOlderError] = useState('')
+  const first = query.data
+
+  if (!first) {
+    return query.isError
+      ? jsxs('div', {
+          className: 'cf-card cf-stack',
+          children: [
+            jsxs('div', {
+              children: [
+                jsx('div', { className: 'cf-err', children: 'Could not load your activity.' }),
+                // A 404 here means the gateway predates this plugin version: its
+                // Python routes load at gateway start, unlike this file.
+                jsx('div', {
+                  className: 'cf-hint',
+                  children: /\b404\b|not found/i.test(String(query.error?.message || query.error || ''))
+                    ? 'The Hermes gateway is running an older version of this plugin. Run "hermes gateway restart" in a terminal, then try again.'
+                    : String(query.error?.message || query.error || 'Try again in a moment.'),
+                }),
+              ],
+            }),
+            jsx('div', { children: jsx(Button, { size: 'sm', variant: 'outline', loading: query.isFetching, onClick: () => query.refetch(), children: 'Try again' }) }),
+          ],
+        })
+      : jsx(ActivitySkeleton, {})
+  }
+  if (first.ok === false) {
+    return jsxs('div', {
+      className: 'cf-card cf-stack',
+      children: [
+        first.unsupported
+          ? jsx('div', { className: 'cf-hint', children: 'Activity needs a CoinFello server update. Until then, it is on CoinFello.' })
+          : jsxs('div', {
+              children: [
+                jsx('div', { className: 'cf-err', children: 'Could not load your activity.' }),
+                jsx('div', { className: 'cf-hint', children: first.error || 'Try again in a moment.' }),
+              ],
+            }),
+        jsxs('div', {
+          className: 'cf-links',
+          children: [
+            first.unsupported ? null : jsx(Button, { size: 'sm', variant: 'outline', onClick: () => query.refetch(), children: 'Try again' }),
+            jsx(LinkPill, { ctx, url: first.activity_url, label: 'Open activity on CoinFello' }),
+          ],
+        }),
+      ],
+    })
+  }
+
+  const { groups, count, cursor } = activityTimeline(first, older)
+  const loadOlder = async () => {
+    setLoadingOlder(true)
+    setOlderError('')
+    try {
+      const page = await ctx.rest(`/activity?before=${encodeURIComponent(cursor)}`, { timeoutMs: 60 * 1000 })
+      if (!page || page.ok === false) setOlderError(errorOf(page, 'Could not load older activity'))
+      else setOlder((pages) => [...pages, page])
+    } catch (exc) {
+      setOlderError(String(exc))
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+  const notes = [
+    first.error ? 'Some transactions could not be loaded. Try again in a moment.' : null,
+    first.fills_error ? 'Hyperliquid fills could not be loaded.' : null,
+    [first, ...older].some((p) => p.incomplete) ? 'Some older activity could not be loaded, so this list may be incomplete.' : null,
+  ].filter(Boolean)
+
+  return jsxs(Fragment, {
+    children: [
+      count === 0
+        ? jsxs('div', {
+            className: 'cf-card cf-act-empty',
+            children: [
+              jsx(Codicon, { name: 'history', size: 18 }),
+              jsx('div', { className: 'cf-act-empty-title', children: 'Nothing yet' }),
+              jsx('div', { className: 'cf-hint', children: 'Trades, transfers and what Fello does for you show up here.' }),
+            ],
+          })
+        : jsx('div', {
+            className: 'cf-card',
+            style: { padding: 6 },
+            children: groups.map((group) =>
+              jsxs(
+                'div',
+                {
+                  className: 'cf-act-day',
+                  role: 'group',
+                  'aria-label': group.label,
+                  children: [
+                    jsx('div', { className: 'cf-net-head', children: jsx('span', { className: 'cf-act-day-label', children: group.label }) }),
+                    ...group.rows.map((row) => jsx(ActivityRow, { ctx, row }, row.key)),
+                  ],
+                },
+                group.label,
+              ),
+            ),
+          }),
+      notes.map((note) => jsx('div', { className: 'cf-hint', style: { padding: '0 2px' }, children: note }, note)),
+      olderError ? jsx('div', { className: 'cf-err', style: { padding: '0 2px' }, children: olderError }) : null,
+      cursor
+        ? jsx('div', {
+            children: jsx(Button, { size: 'sm', variant: 'outline', className: 'w-full', loading: loadingOlder, disabled: loadingOlder, onClick: loadOlder, children: 'Show older' }),
+          })
+        : count > 0
+          ? jsx('div', { className: 'cf-hint cf-center', children: 'That is the start of this wallet’s history.' })
+          : null,
+      jsx('div', { className: 'cf-links', children: jsx(LinkPill, { ctx, url: first.activity_url, label: 'Full activity' }) }),
     ],
   })
 }
@@ -2419,6 +2810,11 @@ function Pane({ ctx }) {
     setBrandState(on)
     ctx.storage.set('brandColors', on)
   }
+  const [homeTab, setHomeTabState] = useState(() => (ctx.storage.get('homeTab', 'assets') === 'activity' ? 'activity' : 'assets'))
+  const setHomeTab = (tab) => {
+    setHomeTabState(tab)
+    ctx.storage.set('homeTab', tab)
+  }
   const home = () => setView({ kind: 'home' })
 
   useLimitPoll(ctx, connected ? data.pending_limit_change_url : null, refresh, setAllowanceMessage)
@@ -2434,6 +2830,7 @@ function Pane({ ctx }) {
     await queryClient.cancelQueries({ queryKey: ['coinfello'] })
     queryClient.removeQueries({ queryKey: ['coinfello', 'portfolio'] })
     queryClient.removeQueries({ queryKey: ['coinfello', 'wallet'] })
+    queryClient.removeQueries({ queryKey: ['coinfello', 'activity'] })
     queryClient.setQueryData(['coinfello', 'status'], {
       endpoint: previous.endpoint,
       app_url: previous.app_url,
@@ -2489,7 +2886,7 @@ function Pane({ ctx }) {
         data.pending_approval_id
           ? null
           : jsx(AllowanceNotice, { status: data, message: allowanceMessage, onOpen: () => setView({ kind: 'settings' }) }),
-        jsx(Assets, { ctx }),
+        jsx(Assets, { ctx, tab: homeTab, setTab: setHomeTab }),
       ],
     })
   } else if (data.sign_in_mode === 'email') body = jsx(EmailSignIn, { ctx, status: data, refresh })

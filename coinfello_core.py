@@ -20,11 +20,15 @@ from urllib.parse import urlsplit
 
 try:  # package import inside Hermes; plain import in tests / standalone use
     from .coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # noqa: F401 (re-exported)
+    from .coinfello_activity import shape_activity, venue_jobs
+    from . import coinfello_venues
     from .coinfello_portfolio import qr_svg_data_uri, shape_portfolio
     from .coinfello_state import (
         clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
 except ImportError:  # pragma: no cover
     from coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # type: ignore[no-redef]
+    from coinfello_activity import shape_activity, venue_jobs  # type: ignore[no-redef]
+    import coinfello_venues  # type: ignore[no-redef]
     from coinfello_portfolio import qr_svg_data_uri, shape_portfolio  # type: ignore[no-redef]
     from coinfello_state import (  # type: ignore[no-redef]
         clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
@@ -825,6 +829,37 @@ def normalize_amount(value: Any) -> str:
     if whole == "0" and not fraction:
         raise ValueError(AMOUNT_ZERO)
     return f"{whole}.{fraction}" if fraction else whole
+
+
+def activity(before: str | None = None) -> dict:
+    """One page of the wallet's history for the pane's Activity tab.
+
+    The first page (no ``before``) also carries the Hyperliquid fills, which
+    the server reads by time window rather than by cursor; older pages are
+    transactions only.
+    """
+    if not supports("get_activity"):
+        return {
+            "ok": False,
+            "unsupported": True,
+            "error": "This CoinFello server does not share activity yet.",
+            "activity_url": app_url("/portfolio/activity"),
+        }
+    payload: dict = {}
+    if before:
+        payload["before"] = before
+    raw = call("get_activity", payload, timeout=45.0)
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"unexpected get_activity reply: {_text(raw)}")
+    # Name the venue under aggregator-routed swaps/bridges (never the
+    # aggregator itself). Best effort and cached; a slow chain read only
+    # leaves that row without a venue until the next refresh.
+    bridge_tool = (lambda tx: call("get_transfer_status", {"tx_hash": tx}, timeout=15.0)) if supports(
+        "get_transfer_status") else None
+    venues = coinfello_venues.resolve(venue_jobs(raw), bridge_tool)
+    model = shape_activity(raw, include_fills=not before, venues=venues)
+    model["activity_url"] = app_url("/portfolio/activity")
+    return model
 
 
 # -- user-confirmed actions ---------------------------------------------------

@@ -12,12 +12,12 @@ if [ -e "$TARGET" ]; then
   echo "Already installed at $TARGET — reinstalling over it."
   rsync -a --delete \
     --exclude .git/ --exclude __pycache__/ --exclude .pytest_cache/ \
-    --exclude .venv/ --exclude '*.pyc' --exclude .coinfello-state.json \
+    --exclude .venv/ --exclude '*.pyc' --exclude .coinfello-state.json --exclude '.coinfello-venues-*.json' \
     "$SRC/" "$TARGET/"
 else
   rsync -a \
     --exclude .git/ --exclude __pycache__/ --exclude .pytest_cache/ \
-    --exclude .venv/ --exclude '*.pyc' --exclude .coinfello-state.json \
+    --exclude .venv/ --exclude '*.pyc' --exclude .coinfello-state.json --exclude '.coinfello-venues-*.json' \
     "$SRC/" "$TARGET/"
 fi
 
