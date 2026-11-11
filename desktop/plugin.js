@@ -589,6 +589,26 @@ function AllowanceNotice({ status, message, onOpen }) {
   })
 }
 
+/** A warning, not a block: the latest Hermes chat runs on a model CoinFello
+ *  does not recommend for onchain actions. */
+function ModelNotice({ status }) {
+  if (!status || !status.last_model || status.model_supported !== false) return null
+  return jsxs('div', {
+    className: 'cf-notice is-static',
+    role: 'note',
+    children: [
+      jsx(Codicon, { name: 'warning', size: 14 }),
+      jsx('span', {
+        className: 'cf-notice-text',
+        children: [
+          jsx('b', { children: `${status.last_model} isn't recommended for onchain actions.` }, 'b'),
+          ` You can keep going; read every approval carefully, or switch to ${status.model_recommended || 'a flagship model'} with /model.`,
+        ],
+      }),
+    ],
+  })
+}
+
 const HOME_TABS = [
   { id: 'assets', label: 'Assets' },
   { id: 'activity', label: 'Activity' },
@@ -2775,6 +2795,7 @@ function Pane({ ctx }) {
           onSwap: () => setView({ kind: 'swap' }),
           onEarn: () => setView({ kind: 'earn' }),
         }),
+        jsx(ModelNotice, { status: data }),
         jsx(AllowanceNotice, { status: data, message: allowanceMessage, onOpen: () => setView({ kind: 'settings' }) }),
         jsx(Assets, { ctx, tab: homeTab, setTab: setHomeTab }),
       ],

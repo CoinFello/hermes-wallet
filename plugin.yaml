@@ -38,6 +38,7 @@ provides_tools:
   - coinfello_show_card
 provides_hooks:
   - pre_tool_call
+  - pre_llm_call
 # CoinFello sign-in: OAuth 2.1 authorization code + PKCE against CoinFello's
 # MCP server. Hermes runs it (`hermes auth add coinfello:coinfello`), stores
 # and refreshes the grant, and attaches it only to requests the plugin makes

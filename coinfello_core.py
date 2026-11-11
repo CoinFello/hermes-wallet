@@ -474,6 +474,15 @@ def status(*, live: bool = True) -> dict:
     }
     hint = account_hint()
     summary["account_hint"] = mask_email(hint["email"]) if hint["email"] else hint["wallet"]
+    last_model = state.get("last_model")
+    if last_model:
+        try:
+            from . import coinfello_models as models
+        except ImportError:  # pragma: no cover
+            import coinfello_models as models  # type: ignore[no-redef]
+        summary["last_model"] = last_model
+        summary["model_supported"] = models.is_supported(last_model)
+        summary["model_recommended"] = models.SUPPORTED_NAMES
     summary.update(_access_summary(state))
     if state.get("pending_limit_change_id"):
         summary["pending_limit_change_url"] = state.get("pending_limit_change_url") or ""

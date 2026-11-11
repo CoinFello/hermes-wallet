@@ -113,7 +113,9 @@ def test_an_expired_intent_is_blocked(server, monkeypatch):
     assert trades.approval_directive("coinfello_execute", {"intent_id": INTENT})["action"] == "block"
 
 
-def test_every_fello_message_is_escalated_on_its_own_key():
+def test_every_fello_message_is_escalated_on_its_own_key(monkeypatch):
+    # A server whose fello_chat cannot stage (Fello could act on a message).
+    monkeypatch.setattr(core, "accepts_param", lambda tool, param: False)
     first = trades.approval_directive("coinfello_chat", {"message": "Stake 1 ETH on Lido"})
     second = trades.approval_directive("coinfello_chat", {"message": "Stake 2 ETH on Lido"})
     assert first["action"] == "approve" and "Stake 1 ETH on Lido" in first["message"]
@@ -265,6 +267,8 @@ def test_register_wires_every_manifest_tool_and_the_approval_hook(monkeypatch):
 def test_every_fund_moving_agent_tool_is_gated(monkeypatch):
     # The agent surface may move funds only through tools the hook escalates.
     plugin = _load_plugin(monkeypatch)
+    # Pinned to a server that cannot stage, so no test reaches the network.
+    monkeypatch.setattr(plugin._trades.core, "accepts_param", lambda tool, param: False)
     ctx = _Ctx()
     plugin.register(ctx)
     hook = ctx.hooks["pre_tool_call"]

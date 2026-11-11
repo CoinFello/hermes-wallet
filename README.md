@@ -35,6 +35,24 @@ Sign in at coinfello.com and the same balances, positions and history are
 there. You can revoke the agent's access from CoinFello at any time and it
 ends right away.
 
+## Recommended models
+
+Onchain actions need a model that gets amounts, chains and multi-step plans
+right. CoinFello recommends the flagships: Claude Opus 5 and later (and the
+Fable and Mythos lines), GPT-6 Astra, Grok 4.6 and later, and Gemini 3 Pro
+and later. On any other model (GLM, Kimi, DeepSeek, Qwen, smaller tiers)
+the plugin warns but never blocks:
+
+- the agent passes a one-time notice on to you, the first time it uses
+  CoinFello in a chat;
+- every approval prompt for a trade or a staged action carries a warning
+  line, so you see it even if the agent doesn't relay it;
+- the pane shows a notice while your latest chat runs on such a model.
+
+Switch with `/model` and the warnings stop on the next turn. The plugin
+learns the model from Hermes's `pre_llm_call` hook, which it only observes:
+it adds nothing to the conversation and never blocks a turn.
+
 ## How it connects
 
 The plugin talks to CoinFello's MCP server. Sign-in is Hermes's own OAuth:

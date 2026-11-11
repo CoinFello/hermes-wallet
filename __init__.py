@@ -15,12 +15,14 @@ from __future__ import annotations
 
 try:
     from . import coinfello_cards as _cards
+    from . import coinfello_models as _models
     from . import coinfello_tools as _t
     from . import coinfello_trades as _trades
 except ImportError:  # pragma: no cover
     # Imported without a parent package (e.g. pytest walking the repo root).
     # Hermes itself always loads this file as the ``coinfello`` package.
     _cards = None
+    _models = None
     _t = None
     _trades = None
 
@@ -48,12 +50,34 @@ def register(ctx) -> None:
             emoji="🪙",
         )
     ctx.register_hook("pre_tool_call", _require_human_approval)
+    # Which model each chat runs on, so CoinFello can warn about models it
+    # does not recommend for onchain actions (coinfello_models). Observes
+    # only: it never injects context or blocks a turn.
+    ctx.register_hook("pre_llm_call", _track_model)
 
 
-def _require_human_approval(tool_name: str = "", args: dict | None = None, **_: object):
+def _track_model(session_id: str = "", model: str = "", **_: object) -> None:
+    try:
+        _models.remember(session_id, model)
+        _t.note_model(model)
+    except Exception:  # an observer must never break a turn
+        pass
+    return None
+
+
+def _require_human_approval(
+    tool_name: str = "", args: dict | None = None, session_id: str = "", **_: object
+):
     """Escalate fund-moving calls to the human (see coinfello_trades)."""
     try:
-        return _trades.approval_directive(tool_name, args)
+        directive = _trades.approval_directive(tool_name, args)
+        if directive and directive.get("action") == "approve":
+            # Shown to the human in the approval prompt itself, every time,
+            # whatever the agent relays.
+            warning = _models.approval_warning(session_id)
+            if warning:
+                directive = {**directive, "message": f"{directive['message']}\n\n{warning}"}
+        return directive
     except Exception:  # fail closed: never let a hook bug wave a trade through
         if tool_name in ("coinfello_execute", "coinfello_chat"):
             return {

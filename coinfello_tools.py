@@ -14,10 +14,12 @@ from tools.registry import tool_error, tool_result
 try:  # package import inside Hermes; plain import in tests
     from . import coinfello_cards as cards
     from . import coinfello_core as core
+    from . import coinfello_models as models
     from . import coinfello_trades as trades
 except ImportError:  # pragma: no cover
     import coinfello_cards as cards  # type: ignore[no-redef]
     import coinfello_core as core  # type: ignore[no-redef]
+    import coinfello_models as models  # type: ignore[no-redef]
     import coinfello_trades as trades  # type: ignore[no-redef]
 
 Handler = Callable[[dict], Any]
@@ -66,18 +68,46 @@ def _run(call: Callable[[], Any]) -> str:
         return tool_error(f"CoinFello tool failed: {type(exc).__name__}: {exc}")
 
 
+MODEL_NOTICE_HINT = (
+    " Tell the user this once, briefly and in your own words, then carry on "
+    "with what they asked."
+)
+
+
+def with_model_notice(result: Any, session_id: str) -> Any:
+    """The first CoinFello result of a chat on a model CoinFello does not
+    recommend carries a warning for the agent to pass on (once per chat)."""
+    notice = models.first_notice(session_id)
+    if not notice:
+        return result
+    if isinstance(result, dict):
+        return {**result, "model_notice": notice + MODEL_NOTICE_HINT}
+    return {"result": result, "model_notice": notice + MODEL_NOTICE_HINT}
+
+
+def note_model(model: Any) -> None:
+    """Remember the latest chat's model for the pane's notice (non-secret;
+    written only when it changes)."""
+    name = str(model or "").strip()
+    if name and core.load_state().get("last_model") != name:
+        core.save_state({"last_model": name})
+
+
 def _wrap(handler: Handler) -> Handler:
-    def safe(args: dict) -> str:
-        return _run(lambda: handler(args or {}))
+    # Hermes passes the context keywords a handler's signature names, so the
+    # wrapper names session_id to learn which chat is calling.
+    def safe(args: dict, session_id: str = "", **_context: Any) -> str:
+        session = str(session_id or "")
+        return _run(lambda: with_model_notice(handler(args or {}), session))
 
     return safe
 
 
 def _wrap_with_session(handler: Callable[..., Any]) -> Callable[..., str]:
-    """Like ``_wrap``, taking the calling session's id from Hermes (which
-    passes the context keywords a handler's signature names)."""
+    """Like ``_wrap``, handing the calling session's id to the handler."""
     def safe(args: dict, session_id: str = "", **_context: Any) -> str:
-        return _run(lambda: handler(args or {}, session_id=str(session_id or "")))
+        session = str(session_id or "")
+        return _run(lambda: with_model_notice(handler(args or {}, session_id=session), session))
 
     return safe
 
