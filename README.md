@@ -53,8 +53,8 @@ automations, yields, ...) when the agent shows one.
 ## Install
 
 ```bash
-git clone git@github.com:CoinFello/coinfello-hermes-plugin.git
-cd coinfello-hermes-plugin
+git clone https://github.com/CoinFello/hermes-wallet.git
+cd hermes-wallet
 ./install.sh                       # copies the plugin into ~/.hermes/plugins/coinfello
 hermes plugins enable coinfello    # admits it AND installs its Python deps (segno)
 ```

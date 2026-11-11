@@ -3,7 +3,7 @@ label: CoinFello
 kind: standalone
 version: 0.3.3
 author: CoinFello
-homepage: https://github.com/CoinFello/coinfello-hermes-plugin
+homepage: https://github.com/CoinFello/hermes-wallet
 description: >
   CoinFello for Hermes Agent: sign in to CoinFello with Hermes's own OAuth
   (`hermes auth add coinfello:coinfello`; Hermes stores and refreshes the

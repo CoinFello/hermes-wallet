@@ -31,7 +31,7 @@ CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.3.3"}
 # analytics: no install id, no extra requests.
 USER_AGENT = (
     f"{CLIENT_INFO['name']}/{CLIENT_INFO['version']} "
-    "(Hermes; +https://github.com/CoinFello/coinfello-hermes-plugin)"
+    "(Hermes; +https://github.com/CoinFello/hermes-wallet)"
 )
 
 
