@@ -1,4 +1,6 @@
-# CoinFello for Hermes Agent
+# Hermes Wallet by CoinFello
+
+![Hermes Wallet by CoinFello](docs/banner.png)
 
 A Hermes Agent plugin that connects the agent to [CoinFello](https://coinfello.com)
 through the CoinFello MCP server: sign in once, and the agent gets fast reads
@@ -17,14 +19,12 @@ automations, yields, ...) when the agent shows one.
 
 ## What you get
 
-**22 agent tools** (toolset `coinfello`):
+**20 agent tools** (toolset `coinfello`):
 
 | Tool | What it does |
 |---|---|
 | `coinfello_status` | Connection state, wallet (funding) address, expiry |
-| `coinfello_connect` | Start sign-in: browser approval link + code (email code on older servers) |
-| `coinfello_poll_approval` | Finish sign-in once the human approved in the browser |
-| `coinfello_verify` | Email-code sign-in, only for servers without browser sign-in |
+| `coinfello_connect` | Tells you the one command to sign in (`hermes auth add coinfello:coinfello`); the agent cannot run it |
 | `coinfello_disconnect` | Revoke the session now |
 | `coinfello_chat` | Ask Fello to do something; it stages fund-moving actions for `coinfello_execute` (each message needs your approval) |
 | `coinfello_job_status` | Poll a running Fello turn (its reply lists staged actions too) |
@@ -39,18 +39,36 @@ automations, yields, ...) when the agent shows one.
 
 **Desktop pane** (desktop half of the same package):
 
-- **Sign in with CoinFello**: opens one approval page in your browser and
-  shows the code to match. Already signed in to CoinFello there? One click.
+![Wallet pane: portfolio by network](docs/pane-home.png)
+![Activity: every transaction, failed ones included](docs/pane-activity.png)
+![Settings: the agent's daily spending limit](docs/pane-settings.png)
+
+Screenshots use demo data.
+
+- **Sign in**: shows the `hermes auth add coinfello:coinfello` command with a
+  copy button, and picks the sign-in up on its own once you have approved it
+  in your browser.
 - **Automations wallet**: address with copy button and a scannable QR to
   fund it (same address on every EVM network).
 - **Portfolio**: total value with its 24h move, balances grouped per network
   with token logos, using the same rules as the web Portfolio view
   (`coinfello_portfolio.py` names the web function each rule is ported from).
-- **Portfolio / Strategies** buttons open the full views in CoinFello.
+- **Full portfolio** and **Strategies** open CoinFello's own views in Hermes
+  tabs; **Activity** lists every transaction, failed ones included.
+- **Settings**: the agent's daily spending limit, your account and sign-out,
+  and appearance.
 - **Cards** the agent shows appear at the top of the pane (see below).
 - Statusbar connection chip.
 
 ## Install
+
+From the Hermes plugin catalog (once the listing is merged):
+
+```bash
+hermes plugins install coinfello
+```
+
+From source:
 
 ```bash
 git clone https://github.com/CoinFello/hermes-wallet.git
@@ -59,9 +77,10 @@ cd hermes-wallet
 hermes plugins enable coinfello    # admits it AND installs its Python deps (segno)
 ```
 
-Restart Hermes. The MCP tools appear as `coinfello_*`; the desktop pane
-appears after **Reload desktop plugins** (⌘K) — the desktop half is opt-in
-and inventories under Capabilities → Plugins.
+Restart Hermes. The agent tools appear as `coinfello_*`. The desktop pane
+appears after **Reload desktop plugins** in the command palette (Ctrl+K, or
+Cmd+K on macOS); the desktop half is opt-in and is listed under
+Capabilities → Plugins.
 
 ### Sign in
 
@@ -139,7 +158,7 @@ off the Automation Wallet in the CoinFello app ends it too.
    approved minimum (`price_moved`) or a different bridge than the approved
    one (`route_changed`) is refused before anything is broadcast.
 4. A bridge's success only confirms the source chain. `coinfello_transfer_status`
-   reads LI.FI's status and says what arrived: `wrong_token` (e.g. Across
+   reads the bridge's delivery status and says what arrived: `wrong_token` (e.g. Across
    delivering WETH instead of native POL) and `refunded` are failures to
    report, not to repair with another trade.
 
@@ -178,7 +197,8 @@ the prompt for these tools too, and non-interactive runs (cron, `-q`) are
 refused unless you configured them to auto-approve.
 
 Servers without `prepare_swap` (older CoinFello servers) cannot
-prepare trades; `coinfello_transfer_status` then reads LI.FI directly.
+prepare trades; `coinfello_transfer_status` then reads the bridge status
+directly.
 
 ## Cards (MCP Apps)
 
@@ -297,9 +317,15 @@ window but the host's own frame are ignored; heights are clamped to
 - Stored by the plugin: non-secret state in Hermes's plugin store
   (`plugin-data/coinfello/state.json`): whether the last request was signed
   in, the wallet address, the access level and a pending limit change.
-- `coinfello_chat` executes on-chain actions **without further
-  confirmation** on the CoinFello side, so Hermes asks you to approve each
-  message. CoinFello enforces the daily limit you approved server-side.
+- **Daily spending limit**: a grant that can trade has one, and CoinFello's
+  server enforces it on every trade, whatever the agent was told. Grants can
+  also be read-only. The plugin and the agent can only lower the limit; a
+  raise returns a link you approve in your browser, and you stay signed in.
+- `coinfello_chat` asks Fello to read and plan. On current CoinFello servers
+  (coinfello-web#1176 and later) a Fello turn over MCP cannot move funds: it
+  tells the agent which trade to prepare, and the trade then goes through
+  `prepare_*` and `coinfello_execute`. Hermes still asks you to approve each
+  message, as a second guard for older servers where Fello could act.
 - Unattended runs (cron, the messaging gateway): sign-in never waits on a
   person; without a grant every tool fails at once with the sign-in command.
   `coinfello_execute` and `coinfello_chat` need Hermes's approval prompt.
@@ -326,8 +352,8 @@ version. That is how CoinFello counts daily and monthly active users and
 installs. Signing out ends the grant; the plugin keeps no other identifier.
 
 Other network calls: token and network icons from MetaMask's icon service
-(`static.cx.metamask.io`) and CoinFello's site, LI.FI's status API for older
-servers' bridge status, and block explorers you choose to open. CoinFello's
+(`static.cx.metamask.io`) and CoinFello's site, and block explorers you
+choose to open. CoinFello's
 cards (see Cards) load their fonts from Google Fonts (`fonts.googleapis.com`,
 `fonts.gstatic.com`), the only outside hosts a card's CSP allows, so Google
 sees your IP address and the font request when a card is drawn; cards have no
@@ -342,15 +368,15 @@ node --test tests/amount.test.mjs        # the pane's amount normalizer (likewis
 node --test tests/embed_host.test.mjs    # the pane's swap/Earn/portfolio embed host (likewise)
 ```
 
-The test suite runs a local mock of the MCP streamable-HTTP transport — no
-network or real credentials involved.
+The test suite runs a local mock of the MCP streamable-HTTP transport, with
+no network or real credentials involved.
 
 ### Layout
 
 ```
 ├── plugin.yaml            agent-plugin manifest (provides_tools)
 ├── pyproject.toml         Python deps (segno), installed by Hermes plugin admission
-├── __init__.py            register(ctx) — registers the agent tools
+├── __init__.py            register(ctx): registers the agent tools and the approval hook
 ├── coinfello_mcp.py       stdlib MCP streamable-HTTP client
 ├── coinfello_state.py     endpoint + non-secret pane state (no credentials)
 ├── coinfello_core.py      service layer (sign-in steps, reads, status)
@@ -370,10 +396,6 @@ network or real credentials involved.
   overflows is scaled down. Opening a card in the main workspace
   (`host.openWorkspace`) would give it full width.
 
-- **Embedded portfolio + strategies**: `/embed/*` routes in coinfello-web
-  (same components as the real pages, short-lived scoped token) hosted in a
-  Hermes full-page view, so web releases reach Hermes with no plugin change.
-  Until then the pane's buttons open CoinFello in the browser.
 - **Tier 2**: MetaMask mobile via WalletConnect (QR pairing; transactions
   approved on-device).
 - **Tier 3**: MetaMask browser extension embedded in the Hermes desktop app
