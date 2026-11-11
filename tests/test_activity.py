@@ -134,7 +134,7 @@ def test_shape_keeps_section_errors_separate():
 def server(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": ME})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": ME})
     return mock_mcp
 
 

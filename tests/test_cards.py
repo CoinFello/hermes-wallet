@@ -16,6 +16,7 @@ The contract under test:
 
 from __future__ import annotations
 
+from conftest import bearer_transport
 import base64
 import json
 import time
@@ -34,7 +35,7 @@ INTENT = "66666666-6666-6666-6666-666666666666"
 def server(mock_mcp, isolated_state, monkeypatch, tmp_path):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xWALLET"})
     mock_mcp.mock_state.update(cards=True, actions=True)
     with trades._intents_lock:
         trades._intents.clear()
@@ -58,7 +59,7 @@ def _show(name="portfolio", arguments=None, surface="desktop"):
 # -- showing a card: surface-dependent replies ---------------------------------
 
 def test_desktop_stores_the_raw_result_and_tells_the_pane(server):
-    out = _show(arguments={"chain_ids": [8453], "session_token": "tok-model", "bogus": 1})
+    out = _show(arguments={"chain_ids": [8453], "signed_in": True, "test_grant": "tok-model", "bogus": 1})
     assert out["shown"] == "coinfello_pane"
     assert out["note"] == cards.PANE_NOTE
     # The server's "Model note" assumes the card sits at the tool call; ours
@@ -151,7 +152,7 @@ def test_relayed_arguments_lose_credentials(server):
     card_id = _show("quote", {"intent_id": INTENT})["card_id"]
     cards.card_call(card_id, "prepare_swap", {
         "from_chain_id": 1, "from_token": "ETH", "to_token": "POL", "amount": "0.1",
-        "session_token": "tok-card", "embed_token": "cfemb", "unknown": "x",
+        "signed_in": True, "test_grant": "tok-card", "embed_token": "cfemb", "unknown": "x",
     })
     name, arguments = _calls(server)[-1]
     assert name == "prepare_swap"
@@ -176,7 +177,7 @@ def test_relayed_amounts_take_the_servers_form(server):
 
 def _client(server):
     host, port = server.server_address[:2]
-    return CoinFelloMCP(f"http://{host}:{port}/mcp", session_token="tok-live")
+    return CoinFelloMCP(f"http://{host}:{port}/mcp", transport=bearer_transport("tok-live"))
 
 
 @pytest.mark.parametrize("uri", [
@@ -720,7 +721,7 @@ def test_nested_arguments_win_over_the_same_key_beside_card(show_tool, server):
 
 
 def test_folded_arguments_lose_secrets_and_undeclared_keys(show_tool, server):
-    show_tool({"card": "yield", "token": "USDC", "session_token": "tok-model",
+    show_tool({"card": "yield", "token": "USDC", "signed_in": True, "test_grant": "tok-model",
                "sessionToken": "tok-model", "bogus": 1, "arguments": {"also_bogus": 2}})
     assert _calls(server)[-1] == ("show_yield_card", {"token": "USDC"})
     assert server.mock_state["auth_headers"][-1] == "Bearer tok-live"

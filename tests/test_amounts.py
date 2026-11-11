@@ -24,7 +24,7 @@ import pytest
 import coinfello_core as core
 import coinfello_trades as trades
 from coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text, validation_message
-from conftest import amount_refusal
+from conftest import bearer_transport, amount_refusal
 
 ROOT = Path(__file__).resolve().parent.parent
 NODE = shutil.which("node")
@@ -37,7 +37,7 @@ READABLE = 'amount: A decimal number, e.g. "1.5"'
 def server(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xWALLET"})
     mock_mcp.mock_state["actions"] = True
     with trades._intents_lock:
         trades._intents.clear()
@@ -139,7 +139,7 @@ def test_other_errors_are_left_alone():
 
 def _client(server):
     host, port = server.server_address[:2]
-    return CoinFelloMCP(f"http://{host}:{port}/mcp", session_token="tok-live")
+    return CoinFelloMCP(f"http://{host}:{port}/mcp", transport=bearer_transport("tok-live"))
 
 
 def test_tool_refusal_raises_readable_and_logs_the_detail(server, caplog):

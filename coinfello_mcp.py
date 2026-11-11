@@ -5,6 +5,11 @@ processes, so this client deliberately speaks just enough JSON-RPC 2.0 over
 the streamable-HTTP transport to initialize a session and call tools,
 tolerating both ``application/json`` and ``text/event-stream`` responses
 (the spec allows the server to answer either way).
+
+Every request goes through Hermes's ``credentialed_provider_request`` with the
+plugin's ``coinfello`` OAuth entry: Hermes attaches the bearer, refreshes it,
+sends it only to the hosts plugin.yaml declares and never follows a redirect.
+This module never sees a token.
 """
 
 from __future__ import annotations
@@ -16,9 +21,10 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Callable, Mapping
 
 PROTOCOL_VERSION = "2025-06-18"
-CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.2.0"}
+CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.3.0"}
 # Every request names the client the standard way. CoinFello's server reads it
 # for its own daily-activity analytics (the server is stateless, so it cannot
 # read clientInfo from initialize on later calls). Nothing else is sent for
@@ -57,6 +63,10 @@ class MCPError(Exception):
 
 class ToolError(MCPError):
     """The tool ran and reported an error (its text is the message)."""
+
+
+class SignInRequired(MCPError):
+    """Hermes holds no usable CoinFello sign-in for this profile."""
 
 
 class SessionExpired(MCPError):
@@ -153,13 +163,63 @@ def _select(payload, want_id):
     return fallback
 
 
+#: ``(url, json body, headers, timeout) -> (status, headers, body)``.
+Transport = Callable[[str, dict, Mapping[str, str], float], "tuple[int, dict, bytes]"]
+
+#: The plugin's ``oauth:`` entry id in plugin.yaml.
+OAUTH_PROVIDER = "coinfello"
+
+
+def hermes_transport(url: str, payload: dict, headers: Mapping[str, str], timeout: float):
+    """POST through Hermes with the user's CoinFello sign-in attached by Hermes."""
+    from hermes_cli.plugin_provider_requests import (
+        ProviderNotSignedIn,
+        credentialed_provider_request,
+    )
+
+    try:
+        response = credentialed_provider_request(
+            OAUTH_PROVIDER, "POST", url, json=payload, headers=dict(headers), timeout=timeout
+        )
+    except ProviderNotSignedIn as error:
+        raise SignInRequired(str(error)) from None
+    except PermissionError as error:
+        raise MCPError(f"Hermes refused the CoinFello request: {error}") from None
+    except Exception as error:  # httpx errors, rebuilt by Hermes without the request
+        raise MCPError(f"could not reach {url}: {error}") from None
+    return response.status, dict(response.headers), response.body
+
+
+def anonymous_transport(url: str, payload: dict, headers: Mapping[str, str], timeout: float):
+    """Plain POST with no credential: only for running outside Hermes (tests, a
+    bare checkout), where there is no sign-in to attach."""
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=dict(headers), method="POST"
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        return error.code, dict(error.headers or {}), error.read() or b""
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        raise MCPError(f"could not reach {url}: {error}") from error
+    return response.status, dict(response.headers), response.read() or b""
+
+
+def default_transport() -> Transport:
+    try:
+        import hermes_cli.plugin_provider_requests  # noqa: F401
+    except ImportError:
+        return anonymous_transport
+    return hermes_transport
+
+
 class CoinFelloMCP:
     """A lazy, thread-safe streamable-HTTP MCP client for one CoinFello session."""
 
-    def __init__(self, url: str, session_token: str | None = None, timeout: float = 90.0):
+    def __init__(self, url: str, timeout: float = 90.0, transport: Transport | None = None):
         self.url = str(url).rstrip("/")
-        self.session_token = session_token
         self.timeout = timeout
+        self._transport = transport or default_transport()
         self._session_id: str | None = None
         self._initialized = False
         self._next_id = 0
@@ -178,41 +238,35 @@ class CoinFelloMCP:
             # also the only client metadata CoinFello's usage analytics read.
             "User-Agent": USER_AGENT,
         }
-        if self.session_token:
-            headers["Authorization"] = f"Bearer {self.session_token}"
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
         return headers
 
     def _post(self, payload: dict) -> tuple[int, dict, bytes]:
-        body = json.dumps(payload).encode("utf-8")
         for _hop in range(3):
-            request = urllib.request.Request(
-                self.url, data=body, headers=self._headers(), method="POST"
-            )
-            try:
-                response = urllib.request.urlopen(request, timeout=self.timeout)
-            except urllib.error.HTTPError as error:
-                target = self._same_host_redirect(error)
-                if target:
-                    # 307/308 keep the method and body. The server moved the
-                    # endpoint (CoinFello's /api/mcp/mcp -> /api/mcp, a 308):
-                    # follow it, and remember it for every later call.
-                    self.url = target
-                    continue
-                return error.code, dict(error.headers or {}), error.read() or b""
-            except (urllib.error.URLError, OSError, TimeoutError) as error:
-                raise MCPError(f"could not reach {self.url}: {error}") from error
-            return response.status, dict(response.headers), response.read() or b""
+            status, headers, body = self._transport(self.url, payload, self._headers(), self.timeout)
+            target = self._same_host_redirect(status, headers)
+            if target:
+                # 307/308 keep the method and body. The server moved the
+                # endpoint (CoinFello's /api/mcp/mcp -> /api/mcp, a 308):
+                # follow it, and remember it for every later call. Hermes
+                # never follows a redirect itself; only the same host is
+                # followed here, so the sign-in never goes anywhere else.
+                self.url = target
+                continue
+            if status == 401:
+                # Hermes refreshes before expiry, so a 401 means the grant
+                # was revoked (sign-out, a lost automation permission) or
+                # ran past CoinFello's 180-day cap.
+                raise SignInRequired("CoinFello no longer accepts this sign-in")
+            return status, headers, body
         raise MCPError(f"too many redirects from {self.url}")
 
-    def _same_host_redirect(self, error: urllib.error.HTTPError) -> str | None:
-        """The 307/308 target, only on the same scheme and host: the request
-        carries the session's bearer token, which must never follow a
-        redirect to another site."""
-        if error.code not in (307, 308):
+    def _same_host_redirect(self, status: int, headers: dict) -> str | None:
+        """The 307/308 target, only on the same scheme and host."""
+        if status not in (307, 308):
             return None
-        location = (error.headers or {}).get("Location")
+        location = _header(headers, "Location")
         if not location:
             return None
         target = urllib.parse.urljoin(self.url, location)

@@ -25,14 +25,14 @@ def server(mock_mcp, isolated_state, monkeypatch):
 
 @pytest.fixture
 def trading(server):
-    core.save_state({"session_token": "tok-trade", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-trade", "wallet_address": "0xWALLET"})
     core.status()  # learns access=trade, $250
     return server
 
 
 @pytest.fixture
 def read_only(server):
-    core.save_state({"session_token": "tok-old", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-old", "wallet_address": "0xWALLET"})
     core.status()
     return server
 
@@ -47,7 +47,7 @@ def test_lowering_applies_at_once_with_the_same_token(trading):
     assert result["daily_limit_usd"] == 100
     assert "No new sign-in" in result["user_message"]
     assert "start_limit_change" not in _calls(trading)
-    assert core.load_state()["session_token"] == "tok-trade"
+    assert core.load_state()["test_grant"] == "tok-trade"  # same grant, no new sign-in
     assert core.status()["daily_limit_usd"] == 100
 
 
@@ -82,7 +82,7 @@ def test_raise_completes_after_the_human_approves(trading):
     assert done["status"] == "approved" and done["daily_limit_usd"] == 5000
     assert "$5,000" in done["user_message"]
     assert "pending_limit_change_url" not in core.status()
-    assert core.load_state()["session_token"] == "tok-trade"
+    assert core.load_state()["test_grant"] == "tok-trade"  # same grant, no new sign-in
 
 
 def test_read_only_becomes_trading_without_a_new_sign_in(read_only):
@@ -93,7 +93,7 @@ def test_read_only_becomes_trading_without_a_new_sign_in(read_only):
     core.poll_limit_change()
     status = core.status()
     assert status["access"] == "trade" and status["can_trade"] is True
-    assert core.load_state()["session_token"] == "tok-old"
+    assert core.load_state()["test_grant"] == "tok-old"  # same grant, no new sign-in
     assert "start_browser_sign_in" not in _calls(read_only)
 
 
@@ -121,24 +121,6 @@ def test_invalid_limits_are_refused_before_any_call(trading, bad):
 def test_read_only_error_points_at_the_limit_tool(read_only):
     assert "coinfello_set_daily_limit" in core.status()["next"]
     assert "coinfello_set_daily_limit" in core.NeedsTradingAccess.MESSAGE
-
-
-def test_sign_in_steps_mention_custom_and_adjusting_later(server):
-    step = next(s for s in core.sign_in_steps("C0DE", "https://x/authorize") if "Read only" in s)
-    assert "custom amount" in step
-    assert "without signing in again" in step
-
-
-def test_servers_without_adjustable_limits_say_so(mock_mcp, isolated_state, monkeypatch):
-    host, port = mock_mcp.server_address[:2]
-    monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp")
-    mock_mcp.mock_state.update(browser_sign_in=True, access_mode=True)
-    core.save_state({"session_token": "tok-trade", "wallet_address": "0xWALLET"})
-    assert core.status()["can_adjust_limit"] is False
-    with pytest.raises(RuntimeError, match="sign in again"):
-        core.change_daily_limit(100)
-    step = next(s for s in core.sign_in_steps("C0DE", "https://x/authorize") if "Read only" in s)
-    assert "custom" not in step and "without signing in again" not in step
 
 
 def test_lowering_forgets_a_pending_raise(trading):

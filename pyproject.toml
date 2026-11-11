@@ -1,6 +1,6 @@
 [project]
 name = "hermes-coinfello"
-version = "0.2.0"
+version = "0.3.0"
 description = "CoinFello plugin for Hermes Agent: MCP session management, wallet reads and the Fello DeFi agent"
 readme = "README.md"
 requires-python = ">=3.10"

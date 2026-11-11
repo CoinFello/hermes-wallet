@@ -37,7 +37,7 @@ SOURCE = "0x" + "3e" * 32
 def server(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0x2222222222222222222222222222222222222222"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0x2222222222222222222222222222222222222222"})
     mock_mcp.mock_state["actions"] = True
     with trades._intents_lock:
         trades._intents.clear()
@@ -71,7 +71,7 @@ def test_prepare_executes_nothing_and_describes_the_server_summary(server):
 def test_prepare_on_an_older_server_says_so_and_points_away_from_chat(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xW"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xW"})
     with pytest.raises(RuntimeError, match="cannot prepare trades yet"):
         _bridge()
 

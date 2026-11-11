@@ -1,41 +1,42 @@
-"""Configuration and credential state for the CoinFello plugin.
+"""Configuration and local (non-secret) state for the CoinFello plugin.
 
-The MCP session token is a secret that can move funds, so it lives under
-``providers.coinfello`` in the profile's ``auth.json`` (where the core auth
-store keeps provider credentials), written under the auth-store lock. Outside
-a Hermes process (tests, bare checkouts) it falls back to a 0600 JSON file
-next to this module so the code stays runnable and testable.
+The plugin holds no credential. CoinFello sign-in is the ``coinfello`` entry
+under ``oauth:`` in ``plugin.yaml``: the human runs
+``hermes auth add coinfello:coinfello`` once, Hermes stores and refreshes the
+grant, and every request goes through Hermes's ``credentialed_provider_request``,
+which attaches the bearer itself (see ``coinfello_mcp``).
+
+What is kept here is what the pane shows between requests: whether the last
+request found a sign-in, the wallet address, the access level and a pending
+limit change. It lives in Hermes's per-plugin state store
+(``plugin-data/coinfello/state.json``). Outside a Hermes process (tests, bare
+checkouts) it falls back to a JSON file next to this module.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+#: CoinFello's MCP endpoint. Fixed: the OAuth bearer may only be sent to the
+#: hosts plugin.yaml declares, so the endpoint is not configurable.
 DEFAULT_MCP_URL = "https://app.coinfello.com/api/mcp"
-ENV_URL_VAR = "COINFELLO_MCP_URL"
-PROVIDER = "coinfello"
+#: The plugin name and its ``oauth:`` entry id: ``hermes auth add coinfello:coinfello``.
+PLUGIN_NAME = "coinfello"
+OAUTH_ID = "coinfello"
+#: The variable Hermes reads the OAuth client id from (declared in plugin.yaml).
+CLIENT_ID_ENV = "COINFELLO_OAUTH_CLIENT_ID"
+#: CoinFello's public client id for this plugin; not a secret (PKCE protects the code).
+CLIENT_ID = "coinfello-hermes"
+SIGN_IN_COMMAND = f"hermes auth add {PLUGIN_NAME}:{OAUTH_ID}"
+SIGN_OUT_COMMAND = f"hermes auth logout {PLUGIN_NAME}:{OAUTH_ID}"
+
+_STATE_KEY = "session"
 FALLBACK_FILE = Path(__file__).resolve().parent / ".coinfello-state.json"
 
 
-def _env_file_value(name: str) -> str:
-    """Honor the profile's ``.env`` the way Hermes does, when it is available."""
-    try:
-        from hermes_cli.config import get_env_value
-
-        return get_env_value(name) or ""
-    except Exception:
-        return ""
-
-
 def mcp_url() -> str:
-    """The streamable-HTTP endpoint: env var (process or .env) over the default."""
-    for source in (os.environ.get(ENV_URL_VAR), _env_file_value(ENV_URL_VAR)):
-        raw = (source or "").strip()
-        if raw:
-            return raw.rstrip("/")
     return DEFAULT_MCP_URL
 
 
@@ -43,94 +44,69 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _auth_helpers():
-    """The Hermes auth-store operations, or None outside a Hermes process."""
+def _plugin_state():
+    """Hermes's state store for this plugin, or None outside a Hermes process."""
     try:
-        from hermes_cli.auth import (
-            _auth_store_lock,
-            _load_auth_store,
-            _load_provider_state,
-            _save_auth_store,
-            _store_provider_state,
-        )
+        from hermes_cli.plugins_state import PluginState
 
-        return _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state
+        return PluginState(PLUGIN_NAME)
     except Exception:
         return None
 
 
-def load_state() -> dict:
-    """The stored session state (``session_token``, ``wallet_address``, ...)."""
-    helpers = _auth_helpers()
-    if helpers is not None:
-        _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state = helpers
-        try:
-            with _auth_store_lock():
-                store = _load_auth_store()
-                state = _load_provider_state(store, PROVIDER)
-            return dict(state) if isinstance(state, dict) else {}
-        except Exception:
-            return {}
+def _read_fallback() -> dict:
     try:
-        return json.loads(FALLBACK_FILE.read_text())
+        data = json.loads(FALLBACK_FILE.read_text())
     except Exception:
         return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_state() -> dict:
+    """The cached state (``signed_in``, ``wallet_address``, ``access``, ...)."""
+    store = _plugin_state()
+    if store is not None:
+        try:
+            value = store.get(_STATE_KEY, {})
+            return dict(value) if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+    return _read_fallback()
 
 
 def save_state(patch: dict) -> dict:
-    """Merge ``patch`` into the stored state and return the merged result."""
-    helpers = _auth_helpers()
-    if helpers is not None:
-        _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state = helpers
+    """Merge ``patch`` into the cached state and return the merged result."""
+    state = load_state()
+    state.update(patch)
+    state["saved_at"] = _now_iso()
+    store = _plugin_state()
+    if store is not None:
         try:
-            with _auth_store_lock():
-                store = _load_auth_store()
-                state = dict(_load_provider_state(store, PROVIDER) or {})
-                state.update(patch)
-                state["saved_at"] = _now_iso()
-                _store_provider_state(store, PROVIDER, state, set_active=False)
-                _save_auth_store(store)
+            store.set(_STATE_KEY, state)
             return state
         except Exception:
             pass  # fall through to the file below
-    state = {}
-    try:
-        state = json.loads(FALLBACK_FILE.read_text())
-    except Exception:
-        pass
-    state.update(patch)
-    state["saved_at"] = _now_iso()
     FALLBACK_FILE.write_text(json.dumps(state, indent=2))
-    try:
-        os.chmod(FALLBACK_FILE, 0o600)
-    except OSError:
-        pass
     return state
 
 
 def clear_state() -> dict:
-    """Forget the session entirely (token, wallet, access, anything pending).
+    """Forget the cached session (wallet, access, anything pending).
 
-    Keeps a NON-SECRET hint of the account that was signed in (email and
-    wallet address), so the next browser sign-in can ask CoinFello for that
-    same account instead of whatever wallet the browser offers first.
+    Keeps a non-secret hint of the account (wallet address), shown on the pane
+    so the human signs in to the same account next time.
     """
     state = load_state()
     hint_wallet = state.get("wallet_address") or state.get("last_wallet_address") or ""
-    hint_email = state.get("signed_in_as") or state.get("email") or state.get("last_signed_in_as") or ""
+    hint_email = state.get("signed_in_as") or state.get("last_signed_in_as") or ""
     return save_state(
         {
-            "session_token": "",
+            "signed_in": False,
             "wallet_address": "",
             "expires_at": "",
-            "email": "",
             "signed_in_as": "",
             "access": None,
             "daily_limit_usd": None,
-            "pending_approval_id": "",
-            "pending_user_code": "",
-            "pending_approval_url": "",
-            "pending_upgrade": False,
             "pending_limit_change_id": "",
             "pending_limit_change_url": "",
             "pending_limit_requested": None,
@@ -141,10 +117,15 @@ def clear_state() -> dict:
 
 
 def forget_account_hint() -> dict:
-    """'Use a different account': the next sign-in asks for no account."""
+    """'Use a different account': forget the remembered account."""
     return save_state({"last_wallet_address": "", "last_signed_in_as": ""})
 
 
 def signed_in(state: dict | None = None) -> bool:
+    """Whether the last request to CoinFello went through with Hermes's sign-in.
+
+    A cache, not a credential: every request asks Hermes, and a request that
+    finds no sign-in flips it back (``coinfello_core.call``).
+    """
     state = state if state is not None else load_state()
-    return bool((state.get("session_token") or "").strip())
+    return bool(state.get("signed_in"))

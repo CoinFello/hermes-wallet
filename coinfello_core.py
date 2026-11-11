@@ -1,11 +1,14 @@
 """Shared service layer for the CoinFello plugin.
 
 Everything the agent tools and the dashboard/desktop API do goes through
-here: sign-in (browser-first, with the email-code flow as a fallback for
-servers that predate it), keeping the session renewed, the status read, the
-pane's wallet and portfolio models, and pass-through MCP tool calls for the
-``get_*`` reads and ``fello_chat``. Raises typed exceptions; callers format
-them.
+here: the sign-in instructions, the status read, the pane's wallet and
+portfolio models, and pass-through MCP tool calls for the ``get_*`` reads and
+``fello_chat``. Raises typed exceptions; callers format them.
+
+Sign-in is Hermes's own OAuth (the ``coinfello`` entry under ``oauth:`` in
+plugin.yaml, ``hermes auth add coinfello:coinfello``): Hermes stores and
+refreshes the grant and attaches it to every request, so nothing here ever
+holds a token.
 """
 
 from __future__ import annotations
@@ -14,29 +17,28 @@ import json
 import re
 import threading
 import time
-from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
 try:  # package import inside Hermes; plain import in tests / standalone use
-    from .coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # noqa: F401 (re-exported)
+    from .coinfello_mcp import (  # noqa: F401 (re-exported)
+        CoinFelloMCP, MCPError, SignInRequired, ToolError, anonymous_transport, result_text)
     from .coinfello_activity import shape_activity, venue_jobs
     from . import coinfello_venues
     from .coinfello_portfolio import qr_svg_data_uri, shape_portfolio
     from .coinfello_state import (
-        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
+        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in,
+        CLIENT_ID, CLIENT_ID_ENV, SIGN_IN_COMMAND, SIGN_OUT_COMMAND)
 except ImportError:  # pragma: no cover
-    from coinfello_mcp import CoinFelloMCP, MCPError, ToolError, result_text  # type: ignore[no-redef]
+    from coinfello_mcp import (  # type: ignore[no-redef]
+        CoinFelloMCP, MCPError, SignInRequired, ToolError, anonymous_transport, result_text)
     from coinfello_activity import shape_activity, venue_jobs  # type: ignore[no-redef]
     import coinfello_venues  # type: ignore[no-redef]
     from coinfello_portfolio import qr_svg_data_uri, shape_portfolio  # type: ignore[no-redef]
     from coinfello_state import (  # type: ignore[no-redef]
-        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in)
+        clear_state, forget_account_hint, load_state, mcp_url, save_state, signed_in,
+        CLIENT_ID, CLIENT_ID_ENV, SIGN_IN_COMMAND, SIGN_OUT_COMMAND)
 
-#: Renew once the session has less than this left (the server issues 30 days).
-RENEW_WITHIN_SECONDS = 14 * 24 * 60 * 60
-#: After a failed renewal attempt, wait this long before trying again.
-RENEW_RETRY_SECONDS = 60 * 60
 #: How long a server capability probe (tools/list) is trusted.
 CAPABILITY_TTL_SECONDS = 10 * 60
 
@@ -44,7 +46,7 @@ _capabilities: dict[str, Any] = {"url": None, "tools": frozenset(), "at": 0.0}
 
 
 class NotSignedIn(Exception):
-    """Raised when an action needs a CoinFello session and none is stored."""
+    """Raised when an action needs a CoinFello sign-in and Hermes holds none."""
 
 
 class NeedsTradingAccess(Exception):
@@ -55,8 +57,7 @@ class NeedsTradingAccess(Exception):
         "This CoinFello session is read-only, so it cannot move funds. Nothing "
         "was sent. To trade, ask the human for a daily limit and call "
         "coinfello_set_daily_limit (they approve it in their browser, same "
-        "session); on servers without it, call coinfello_connect for a new "
-        "browser sign-in. Send the returned user_message exactly as written."
+        "sign-in). Send the returned user_message exactly as written."
     )
 
     def __init__(self) -> None:
@@ -98,13 +99,9 @@ def _text(result) -> str:
     return str(result)
 
 
-def _client(state: dict | None = None, timeout: float = 90.0) -> CoinFelloMCP:
-    state = state if state is not None else load_state()
-    return CoinFelloMCP(
-        mcp_url(),
-        session_token=(state.get("session_token") or "").strip() or None,
-        timeout=timeout,
-    )
+def _client(timeout: float = 90.0) -> CoinFelloMCP:
+    """A client whose requests carry Hermes's CoinFello sign-in."""
+    return CoinFelloMCP(mcp_url(), timeout=timeout)
 
 
 # -- server capabilities -----------------------------------------------------
@@ -117,7 +114,9 @@ def server_tools(*, refresh: bool = False) -> frozenset:
         and time.monotonic() - _capabilities["at"] < CAPABILITY_TTL_SECONDS
     )
     if refresh or not fresh:
-        tools = _client(timeout=20.0).list_tools()
+        # tools/list is public: probe without the sign-in, so the pane knows
+        # what the server offers before anyone has signed in.
+        tools = CoinFelloMCP(mcp_url(), timeout=20.0, transport=anonymous_transport).list_tools()
         names = frozenset(tool.get("name", "") for tool in tools)
         descriptions = {tool.get("name", ""): tool.get("description") or "" for tool in tools}
         properties = {tool.get("name", ""): _properties(tool) for tool in tools}
@@ -254,8 +253,8 @@ def offers_access_choice() -> bool:
 
 
 def sign_in_mode() -> str:
-    """``browser`` on servers with browser sign-in, else ``email``."""
-    return "browser" if supports("start_browser_sign_in") else "email"
+    """Always Hermes's own OAuth sign-in (``hermes auth add``)."""
+    return "hermes"
 
 
 def app_url(path: str = "/") -> str:
@@ -264,84 +263,51 @@ def app_url(path: str = "/") -> str:
     return f"{parts.scheme}://{parts.netloc}{path}"
 
 
-# -- session use + renewal ---------------------------------------------------
+# -- session use ---------------------------------------------------------------
 
-def _seconds_left(expires_at: str) -> float | None:
-    try:
-        when = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except (AttributeError, ValueError):
-        return None
-    return (when - datetime.now(timezone.utc)).total_seconds()
+def sign_in_message() -> str:
+    """How the human signs in: one command in their own terminal."""
+    return (
+        "To connect CoinFello, run this once in a terminal on this computer:\n"
+        f"  {SIGN_IN_COMMAND}\n"
+        "It opens CoinFello in your browser: sign in, choose what your agent may "
+        "do (read only, or a daily trading limit), and approve. Hermes keeps the "
+        f"sign-in from then on. If it says {CLIENT_ID_ENV} is missing, first run:\n"
+        f"  echo '{CLIENT_ID_ENV}={CLIENT_ID}' >> \"$(hermes config env-path)\""
+    )
 
 
 def maybe_renew(state: dict | None = None) -> dict:
-    """Renew the stored session when it nears expiry; returns current state.
+    """Hermes refreshes the OAuth grant itself; kept for callers of the old API."""
+    return state if state is not None else load_state()
 
-    Never raises: a failed renewal leaves the (still valid) session in place
-    and is retried after ``RENEW_RETRY_SECONDS``.
-    """
-    state = state if state is not None else load_state()
-    if not signed_in(state):
-        return state
-    left = _seconds_left(state.get("expires_at") or "")
-    if left is None or left > RENEW_WITHIN_SECONDS:
-        return state
-    last_attempt = float(state.get("renew_attempted_at") or 0)
-    if time.time() - last_attempt < RENEW_RETRY_SECONDS:
-        return state
-    if not supports("renew_session"):
-        return state
+
+def _signed_in_call(action, timeout: float):
+    client = _client(timeout=timeout)
     try:
-        result = _client(state, timeout=20.0).call_tool("renew_session", {})
-    except MCPError:
-        return save_state({"renew_attempted_at": time.time()})
-    if isinstance(result, dict) and result.get("session_token"):
-        return save_state(
-            {
-                "session_token": result["session_token"],
-                "wallet_address": result.get("wallet_address") or state.get("wallet_address") or "",
-                "expires_at": result.get("expires_at") or "",
-                "renew_attempted_at": 0,
-            }
-        )
-    return save_state({"renew_attempted_at": time.time()})
-
-
-def _resolve_token(args: dict) -> str:
-    """An explicit session_token argument wins; otherwise the stored one."""
-    explicit = str((args or {}).get("session_token") or "").strip()
-    if explicit:
-        return explicit
-    stored = (maybe_renew().get("session_token") or "").strip()
-    if not stored:
-        raise NotSignedIn(
-            "call coinfello_connect to start a browser sign-in, then "
-            "coinfello_poll_approval once the human has approved"
-        )
-    return stored
+        result = action(client)
+    except SignInRequired as exc:
+        if signed_in():
+            save_state({"signed_in": False})
+        raise NotSignedIn(sign_in_message()) from exc
+    if not signed_in():
+        save_state({"signed_in": True})
+    return result
 
 
 def call(name: str, payload: dict | None = None, *, timeout: float = 90.0):
-    """Call any MCP tool with the stored (or explicit) session attached."""
-    payload = dict(payload or {})
-    token = _resolve_token(payload)
-    payload.pop("session_token", None)
-    client = _client(timeout=timeout)
-    client.session_token = token
-    return client.call_tool(name, payload)
+    """Call any MCP tool with Hermes's CoinFello sign-in attached."""
+    payload = {k: v for k, v in dict(payload or {}).items() if k != "session_token"}
+    return _signed_in_call(lambda client: client.call_tool(name, payload), timeout)
 
 
 def call_result(name: str, payload: dict | None = None, *, timeout: float = 90.0) -> dict:
     """``call``, returning the raw CallToolResult (no raise on ``isError``).
 
     For MCP App cards, which render the result exactly as the server sent it.
-    Always the stored session: a card never supplies a token.
     """
     payload = {k: v for k, v in dict(payload or {}).items() if k != "session_token"}
-    token = _resolve_token({})
-    client = _client(timeout=timeout)
-    client.session_token = token
-    return client.call_tool_result(name, payload)
+    return _signed_in_call(lambda client: client.call_tool_result(name, payload), timeout)
 
 
 def trading_call_result(name: str, payload: dict | None = None, *, timeout: float = 90.0) -> dict:
@@ -357,67 +323,14 @@ def trading_call_result(name: str, payload: dict | None = None, *, timeout: floa
 
 def read_card_resource(uri: str) -> dict:
     """One ``ui://coinfello/`` card document (see ``CoinFelloMCP.read_resource``)."""
-    client = _client(timeout=20.0)
-    client.session_token = (maybe_renew().get("session_token") or "").strip() or None
-    return client.read_resource(uri)
+    return _signed_in_call(lambda client: client.read_resource(uri), 20.0)
 
 
 # -- sign-in -----------------------------------------------------------------
 
-def sign_in_steps(code: str, url: str, *, upgrade: bool = False) -> list[str]:
-    """The approval page's steps, in the order it asks for them.
-
-    One source for the pane and the agent: the agent relays ``user_message``
-    verbatim rather than paraphrasing, because a paraphrase put the code
-    before the CoinFello login and the login then looked like a mistake.
-    """
-    steps = [
-        f"Open {url} in your regular web browser (if you're already signed in "
-        "to CoinFello there, the next step is skipped).",
-        _sign_in_step(),
-        f"When the page asks for your agent's code, type: {code}",
-    ]
-    if offers_access_choice():
-        adjustable = can_adjust_limit()
-        steps.append(
-            "Choose what your agent may do: Read only, or trade up to a daily "
-            + ("limit ($50, $250, $1,000, or a custom amount)." if adjustable
-               else "limit ($50, $250 or $1,000).")
-            + (" Pick a daily limit, since you're enabling trading." if upgrade else "")
-            + (" You can change it later from the CoinFello pane in Hermes, "
-               "without signing in again." if adjustable else "")
-        )
-    steps.append("Approve. Hermes picks up the sign-in on its own; nothing to paste back.")
-    return steps
-
-
-def _sign_in_step() -> str:
-    hint = account_hint()
-    who = (
-        f"the CoinFello account you use in Hermes ({mask_email(hint['email'])})"
-        if hint["email"] and "@" in hint["email"]
-        else "your CoinFello account"
-    )
-    return (
-        f"Sign in to {who} with your email or phone. If the browser asks you to "
-        "sign in or sign a message with a wallet extension such as MetaMask, "
-        "cancel it: that is a different account. This is not where the code goes."
-    )
-
-
-def _sign_in_message(code: str, url: str, *, upgrade: bool) -> str:
-    lead = (
-        "Your CoinFello session is read-only. To let me trade, sign in again "
-        "and choose a daily limit:"
-        if upgrade
-        else "To connect CoinFello:"
-    )
-    numbered = "\n".join(f"{i}. {step}" for i, step in enumerate(sign_in_steps(code, url, upgrade=upgrade), 1))
-    return f"{lead}\n{numbered}\nThe code expires in 10 minutes."
-
 def _access_fields(result: dict) -> dict:
-    """The session's access as the server reports it (whoami / sign-in result).
-    Absent on older servers, whose sessions could always trade."""
+    """The session's access as the server reports it (whoami). Absent on older
+    servers, whose sessions could always trade."""
     if "access" not in result:
         return {}
     access = result.get("access")
@@ -425,166 +338,6 @@ def _access_fields(result: dict) -> dict:
         "access": access,
         "daily_limit_usd": result.get("daily_limit_usd") if access == "trade" else None,
     }
-
-
-def _store_session(result: dict, **extra) -> dict:
-    previous = (load_state().get("session_token") or "").strip()
-    state = save_state(
-        {
-            "session_token": result["session_token"],
-            "wallet_address": result.get("wallet_address") or "",
-            "expires_at": result.get("expires_at") or "",
-            # Who approved the sign-in (email, else phone). Whoever approves
-            # the browser link is who the plugin now acts as, so it is shown.
-            "signed_in_as": result.get("signed_in_as") or "",
-            "access": None,
-            "daily_limit_usd": None,
-            **_access_fields(result),
-            "pending_approval_id": "",
-            "pending_user_code": "",
-            "pending_approval_url": "",
-            "pending_upgrade": False,
-            "renew_attempted_at": 0,
-            **extra,
-        }
-    )
-    # An upgrade (read-only -> trading) replaces a live session: end the old
-    # one server-side so a read-only token is not left valid for 30 days.
-    if previous and previous != result["session_token"]:
-        threading.Thread(
-            target=_revoke_on_server, args=(previous,), name="coinfello-replace", daemon=True
-        ).start()
-    return state
-
-
-def start_browser_sign_in() -> dict:
-    """Browser-first sign-in: one approval in a browser, no email code."""
-    if not supports("start_browser_sign_in"):
-        raise RuntimeError(
-            "this CoinFello server does not offer browser sign-in yet; "
-            "sign in with an email code instead (coinfello_connect with email)"
-        )
-    hint = account_hint()
-    args: dict[str, Any] = {}
-    if hint["wallet"] and accepts_param("start_browser_sign_in", "expected_wallet"):
-        args["expected_wallet"] = hint["wallet"]
-    if hint["email"] and "@" in hint["email"] and accepts_param("start_browser_sign_in", "expected_email"):
-        args["expected_email"] = hint["email"]
-    result = _client().call_tool("start_browser_sign_in", args)
-    if not isinstance(result, dict) or not result.get("approval_url"):
-        raise RuntimeError(_text(result))
-    upgrade = signed_in()
-    code = result.get("user_code") or ""
-    save_state(
-        {
-            "pending_approval_id": result.get("approval_id") or "",
-            "pending_user_code": code,
-            "pending_approval_url": result["approval_url"],
-            "pending_upgrade": upgrade,
-        }
-    )
-    return {
-        "ok": True,
-        "status": "approval_required",
-        "approval_url": result["approval_url"],
-        "user_code": code,
-        "approval_id": result.get("approval_id") or "",
-        "expires_in_seconds": result.get("expires_in_seconds"),
-        "upgrade": upgrade,
-        "steps": sign_in_steps(code, result["approval_url"], upgrade=upgrade),
-        "user_message": _sign_in_message(code, result["approval_url"], upgrade=upgrade),
-        "next": (
-            "Send user_message to the human exactly as written (the steps are "
-            "in the order the page asks for them; do not reorder or shorten "
-            "them, and do not open the link yourself or in an in-app preview). "
-            "Then call coinfello_poll_approval every 5-10 seconds."
-        ),
-    }
-
-
-def connect(email: str = "") -> dict:
-    """Start signing in. Browser-first when the server supports it (``email``
-    is then ignored); otherwise email a Privy login code."""
-    email = str(email or "").strip()
-    if sign_in_mode() == "browser":
-        return start_browser_sign_in()
-    if not email or "@" not in email:
-        raise ValueError(
-            "this CoinFello server only supports email sign-in: a valid email "
-            "address is required"
-        )
-    save_state({"email": email})
-    result = _client().call_tool("privy_send_login_code", {"email": email})
-    return {"ok": True, "status": "code_sent", "email": email, "message": _text(result)}
-
-
-def verify(email: str, code: str) -> dict:
-    """Email flow, step 2: exchange the code for a session, or the approval step."""
-    email = str(email or "").strip()
-    code = str(code or "").strip()
-    if not (code.isdigit() and len(code) == 6):
-        raise ValueError("the login code is 6 digits")
-    result = _client().call_tool(
-        "privy_verify_login_code", {"email": email, "code": code}
-    )
-    if not isinstance(result, dict):
-        result = {"text": str(result)}
-    if result.get("session_token"):
-        state = _store_session(result, email=email)
-        return {
-            "ok": True,
-            "status": "signed_in",
-            "wallet_address": state.get("wallet_address") or "",
-            "expires_at": state.get("expires_at") or "",
-            "message": _text(result),
-        }
-    if result.get("approval_required"):
-        save_state(
-            {
-                "email": email,
-                "pending_approval_id": result.get("approval_id") or "",
-                "pending_approval_url": result.get("approval_url") or "",
-                "session_token": "",
-                "wallet_address": "",
-                "expires_at": "",
-            }
-        )
-        return {
-            "ok": True,
-            "status": "approval_required",
-            "approval_url": result.get("approval_url") or "",
-            "approval_id": result.get("approval_id") or "",
-            "expires_in_seconds": result.get("expires_in_seconds"),
-            "message": _text(result),
-        }
-    # The server refused with human-readable guidance (not linked, not
-    # delegated, ...) — surface it verbatim.
-    raise RuntimeError(_text(result))
-
-
-def poll_approval(approval_id: str | None = None) -> dict:
-    """Finish an approval-link sign-in (browser-first, or email + approval)."""
-    approval_id = str(approval_id or load_state().get("pending_approval_id") or "").strip()
-    if not approval_id:
-        raise ValueError("no pending approval — start again from coinfello_connect")
-    result = _client().call_tool("privy_complete_approval", {"approval_id": approval_id})
-    if not isinstance(result, dict):
-        result = {"text": str(result)}
-    if result.get("status") == "pending":
-        return {"ok": True, "status": "pending"}
-    if result.get("session_token"):
-        state = _store_session(result)
-        out = {
-            "ok": True,
-            "status": "signed_in",
-            "wallet_address": state.get("wallet_address") or "",
-            "signed_in_as": state.get("signed_in_as") or "",
-            "expires_at": state.get("expires_at") or "",
-            **_access_summary(state),
-        }
-        out["user_message"] = _signed_in_message(out)
-        return out
-    raise RuntimeError(_text(result))
 
 
 def _access_summary(state: dict) -> dict:
@@ -614,27 +367,46 @@ def _signed_in_message(result: dict) -> str:
     return f"Signed in to CoinFello as {who}. {what} If that's not your account, sign out now.".replace("  ", " ")
 
 
+def connect(email: str = "") -> dict:
+    """Sign-in is Hermes's (``hermes auth add coinfello:coinfello``), run by
+    the human in their own terminal: Hermes refuses it from an agent session,
+    a gateway or cron. Reports the current sign-in, or the steps. ``email`` is
+    accepted for older callers and ignored."""
+    current = status()
+    if current.get("connected"):
+        current["status"] = "signed_in"
+        current["user_message"] = _signed_in_message(current)
+        return current
+    return {
+        "ok": True,
+        "status": "sign_in_required",
+        "command": SIGN_IN_COMMAND,
+        "client_id_env": CLIENT_ID_ENV,
+        "client_id": CLIENT_ID,
+        "user_message": sign_in_message(),
+        "next": (
+            "Send user_message to the human exactly as written. You cannot run "
+            "the command yourself: Hermes only signs in from the human's own "
+            "terminal. Call coinfello_status once they say they're done."
+        ),
+    }
+
+
 def cancel_sign_in() -> dict:
-    """Forget a pending approval (the link simply expires server-side)."""
-    save_state(
-        {
-            "pending_approval_id": "",
-            "pending_user_code": "",
-            "pending_approval_url": "",
-            "pending_upgrade": False,
-        }
-    )
+    """Nothing pending on this side: the browser step lives in `hermes auth add`."""
     return {"ok": True}
 
 
-def _revoke_on_server(token: str, *, attempts: int = 3) -> str | None:
-    """Sign the session out server-side; returns the last error, or None."""
-    client = CoinFelloMCP(mcp_url(), session_token=token, timeout=20.0)
+def _revoke_on_server(*, attempts: int = 3) -> str | None:
+    """End the OAuth grant server-side (``sign_out``); the last error, or None.
+    Hermes's next refresh of the grant then fails, and it marks it revoked."""
     error: str | None = None
     for attempt in range(attempts):
         try:
-            client.call_tool("sign_out", {})
+            _client(timeout=20.0).call_tool("sign_out", {})
             return None
+        except SignInRequired:
+            return None  # Hermes holds no sign-in: nothing to revoke
         except ToolError as exc:
             return str(exc)  # the server answered (e.g. already signed out): no retry
         except MCPError as exc:
@@ -644,28 +416,29 @@ def _revoke_on_server(token: str, *, attempts: int = 3) -> str | None:
 
 
 def disconnect(*, wait: bool = True) -> dict:
-    """Forget the session locally at once, and revoke it server-side.
+    """Sign out: CoinFello revokes the grant, so neither this Hermes nor
+    anything holding a copy of its tokens can use it again.
 
-    ``wait=False`` (the pane) returns as soon as the local session is gone and
-    revokes in a background thread with retries: signing out is instant for
-    the user, and the token is already unusable from here. ``wait=True`` (the
-    agent tool) reports the server's answer.
+    ``wait=False`` (the pane) returns at once and revokes in the background.
+    Removing the dead grant from Hermes's own store is the human's
+    ``hermes auth logout coinfello:coinfello``; the plugin never edits it.
     """
-    token = (load_state().get("session_token") or "").strip()
     clear_state()
-    result: dict[str, Any] = {"ok": True, "signed_out": True}
-    if not token:
-        return result
+    result: dict[str, Any] = {
+        "ok": True,
+        "signed_out": True,
+        "remove_from_hermes": SIGN_OUT_COMMAND,
+        "user_message": (
+            "Signed out of CoinFello: the sign-in is revoked. To also remove it "
+            f"from Hermes, run `{SIGN_OUT_COMMAND}`."
+        ),
+    }
     if not wait:
-        threading.Thread(
-            target=_revoke_on_server, args=(token,), name="coinfello-sign-out", daemon=True
-        ).start()
+        threading.Thread(target=_revoke_on_server, name="coinfello-sign-out", daemon=True).start()
         return result
-    error = _revoke_on_server(token)
+    error = _revoke_on_server()
     if error:
-        result["warning"] = (
-            "the local session was cleared, but the server sign-out failed: " + error
-        )
+        result["warning"] = "the server sign-out failed: " + error
     return result
 
 
@@ -684,78 +457,60 @@ def param_enum(tool: str, param: str) -> tuple | None:
 # -- status + pane models ----------------------------------------------------
 
 def status(*, live: bool = True) -> dict:
-    """Connection state for the pane and the agent. Never leaks the token."""
-    state = maybe_renew() if live else load_state()
+    """Connection state for the pane and the agent. ``live`` asks CoinFello
+    (through Hermes); otherwise the cached state from the last request."""
+    state = load_state()
     summary: dict[str, Any] = {
         "endpoint": mcp_url(),
         "app_url": app_url("/"),
-        "email": state.get("email") or "",
-        "connected": False,
+        "connected": signed_in(state),
+        "sign_in_mode": "hermes",
+        "sign_in_command": SIGN_IN_COMMAND,
+        "sign_out_command": SIGN_OUT_COMMAND,
+        "client_id_env": CLIENT_ID_ENV,
+        "client_id": CLIENT_ID,
+        "wallet_address": state.get("wallet_address") or "",
+        "signed_in_as": state.get("signed_in_as") or "",
     }
-    if not signed_in(state):
-        hint = account_hint()
-        summary["account_hint"] = mask_email(hint["email"]) if hint["email"] else ""
-        summary["pending_approval_id"] = state.get("pending_approval_id") or ""
-        summary["pending_user_code"] = state.get("pending_user_code") or ""
-        summary["pending_approval_url"] = state.get("pending_approval_url") or ""
-        if live:
-            summary["sign_in_mode"] = sign_in_mode()
-            if summary["pending_approval_id"]:
-                summary["sign_in_steps"] = sign_in_steps(
-                    summary["pending_user_code"], summary["pending_approval_url"]
-                )
-        return summary
-    summary["connected"] = True
-    summary["wallet_address"] = state.get("wallet_address") or ""
-    summary["expires_at"] = state.get("expires_at") or ""
-    summary["signed_in_as"] = state.get("signed_in_as") or state.get("email") or ""
+    hint = account_hint()
+    summary["account_hint"] = mask_email(hint["email"]) if hint["email"] else hint["wallet"]
     summary.update(_access_summary(state))
-    if state.get("pending_approval_id"):
-        # Signed in, with a sign-in in flight: the read-only -> trading upgrade.
-        summary["pending_approval_id"] = state["pending_approval_id"]
-        summary["pending_user_code"] = state.get("pending_user_code") or ""
-        summary["pending_approval_url"] = state.get("pending_approval_url") or ""
-        summary["pending_upgrade"] = bool(state.get("pending_upgrade"))
-    if not live:
-        return summary
-    # Carried while signed in so the pane can show the right sign-in form the
-    # instant the user signs out (cached capability probe: no extra request).
-    summary["sign_in_mode"] = sign_in_mode()
-    summary["can_adjust_limit"] = can_adjust_limit()
-    summary["earn_supported"] = embeds_earn()
     if state.get("pending_limit_change_id"):
         summary["pending_limit_change_url"] = state.get("pending_limit_change_url") or ""
         summary["pending_limit_requested"] = state.get("pending_limit_requested")
-    if summary.get("pending_approval_id"):
-        summary["sign_in_steps"] = sign_in_steps(
-            summary["pending_user_code"], summary["pending_approval_url"],
-            upgrade=summary.get("pending_upgrade", False),
-        )
+    if not live:
+        return summary
     try:
         who = call("whoami", {}, timeout=15.0)
-        if isinstance(who, dict):
-            summary["wallet_address"] = who.get("wallet_address") or summary["wallet_address"]
-            summary["expires_at"] = who.get("expires_at") or summary["expires_at"]
-            summary["server_confirmed"] = True
-            access = _access_fields(who)
-            if access:
-                save_state(access)  # the server decides; keep the local copy honest
-                summary.update(_access_summary({**state, **access}))
-            for key in ("spent_today_usd", "remaining_today_usd"):
-                if who.get(key) is not None:
-                    summary[key] = who[key]
-    except (MCPError, ToolError, NotSignedIn) as exc:
+    except NotSignedIn:
         summary["connected"] = False
+        summary["user_message"] = sign_in_message()
+        return summary
+    except (MCPError, ToolError) as exc:
         summary["error"] = str(exc)
-        summary["sign_in_mode"] = sign_in_mode()
+        return summary
+    summary["connected"] = True
+    summary["server_confirmed"] = True
+    if isinstance(who, dict):
+        cached = {
+            "wallet_address": who.get("wallet_address") or summary["wallet_address"],
+            "signed_in_as": who.get("signed_in_as") or summary["signed_in_as"],
+            **_access_fields(who),
+        }
+        save_state(cached)  # the server decides; keep the local copy honest
+        summary.update(cached)
+        summary.update(_access_summary({**state, **cached}))
+        summary["expires_at"] = who.get("expires_at") or ""
+        for key in ("spent_today_usd", "remaining_today_usd"):
+            if who.get(key) is not None:
+                summary[key] = who[key]
+    summary["can_adjust_limit"] = can_adjust_limit()
+    summary["earn_supported"] = embeds_earn()
     if summary.get("access") == "read_only":
         summary["next"] = (
             "Read-only session: reads and quotes work, trades are refused. To "
-            + ("trade, call coinfello_set_daily_limit with the human's chosen "
-               "daily limit (they approve it in their browser; no new sign-in)."
-               if summary.get("can_adjust_limit") else
-               "trade, call coinfello_connect (it starts the upgrade) and send its "
-               "user_message to the human exactly as written.")
+            "trade, call coinfello_set_daily_limit with the human's chosen "
+            "daily limit (they approve it in their browser; no new sign-in)."
         )
     return summary
 

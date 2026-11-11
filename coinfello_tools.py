@@ -43,11 +43,6 @@ _CHAIN_IDS = {
     "items": {"type": "integer"},
     "description": "Chain IDs to limit the read to (e.g. [8453] for Base); omit for every supported chain",
 }
-_SESSION_TOKEN = {
-    "type": "string",
-    "description": "Optional explicit MCP session token; by default the plugin's stored session is used",
-}
-
 _TOKEN = lambda key: {  # noqa: E731
     "type": "string",
     "description": f"{key.capitalize()}: token symbol (e.g. \"USDC\") or contract address",
@@ -95,14 +90,6 @@ def _status(args: dict) -> dict:
 
 def _connect(args: dict) -> Any:
     return core.connect(str(args.get("email") or ""))
-
-
-def _verify(args: dict) -> Any:
-    return core.verify(str(args.get("email") or ""), str(args.get("code") or ""))
-
-
-def _poll_approval(args: dict) -> Any:
-    return core.poll_approval(str(args.get("approval_id") or ""))
 
 
 def _disconnect(args: dict) -> Any:
@@ -212,7 +199,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "and as whom, its access (read_only, or trade with daily_limit_usd, "
             "spent_today_usd and remaining_today_usd), the automation wallet "
             "address (the address to send funds to, on any EVM network), and "
-            "when the session expires. Check access before preparing a trade: "
+            "how to sign in when not connected. Check access before preparing a trade: "
             "a read_only session is refused, and `next` says how to upgrade.",
             {},
         ),
@@ -222,47 +209,17 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         "coinfello_connect",
         _schema(
             "coinfello_connect",
-            "Start signing in to CoinFello, or upgrade a read-only session so it "
-            "can trade. Returns user_message: SEND IT TO THE HUMAN EXACTLY AS "
-            "WRITTEN. It lists the approval page's steps in the order the page "
-            "asks for them (open the link in their own browser, sign in to "
-            "CoinFello with email or phone, then type the code, then choose read "
-            "only or a daily limit, then approve); a reordered paraphrase "
-            "confuses people. Do not open approval_url yourself or in an in-app "
-            "preview. Then call coinfello_poll_approval every 5-10 seconds. On "
-            "older servers without browser sign-in, pass email: a login code is "
-            "emailed instead, finished with coinfello_verify.",
-            {"email": {**_STRING, "description": "Only needed on servers without browser sign-in"}},
+            "Connect CoinFello. Sign-in is Hermes's own OAuth: the human runs "
+            "`hermes auth add coinfello:coinfello` once in their own terminal "
+            "(it opens CoinFello in their browser, where they choose read only "
+            "or a daily trading limit). Returns the current sign-in if there is "
+            "one, else user_message with the steps: SEND IT TO THE HUMAN EXACTLY "
+            "AS WRITTEN. You cannot run the command yourself; call "
+            "coinfello_status once they say they're done. To let a read-only "
+            "session trade, use coinfello_set_daily_limit instead.",
+            {},
         ),
         _connect,
-    ),
-    (
-        "coinfello_verify",
-        _schema(
-            "coinfello_verify",
-            "Email sign-in only (older servers): exchanges the 6-digit emailed "
-            "code for a session that lets Fello act on the account's automation "
-            "wallet. Tell the human before calling. If the wallet needs approval, "
-            "this returns approval_required with a link; then poll "
-            "coinfello_poll_approval.",
-            {"email": _STRING, "code": {**_STRING, "description": "The 6-digit code from the login email"}},
-            ("email", "code"),
-        ),
-        _verify,
-    ),
-    (
-        "coinfello_poll_approval",
-        _schema(
-            "coinfello_poll_approval",
-            "Finishes a sign-in that is waiting on the human's browser approval. "
-            "Call every 5-10 seconds after they have the approval link; returns "
-            "status pending until they approve, then completes the sign-in. "
-            "When signed in, send its user_message to the human: it names the "
-            "account and says whether the session can trade. The session renews "
-            "itself while in use.",
-            {"approval_id": {**_STRING, "description": "approval_id from coinfello_connect (default: the pending one)"}},
-        ),
-        _poll_approval,
     ),
     (
         "coinfello_set_daily_limit",
@@ -300,8 +257,9 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         "coinfello_disconnect",
         _schema(
             "coinfello_disconnect",
-            "Sign out of CoinFello: ends the MCP session now and clears the stored "
-            "token. The wallet itself is untouched.",
+            "Sign out of CoinFello: CoinFello revokes this Hermes sign-in at once. "
+            "The wallet itself is untouched. Send the returned user_message: it "
+            "names the command that also removes the sign-in from Hermes.",
             {},
         ),
         _disconnect,
@@ -327,7 +285,6 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             {
                 "message": {**_STRING, "description": "What you want Fello to do or answer"},
                 "chat_id": {**_STRING, "description": "chat_id from a previous reply, to continue that conversation"},
-                "session_token": _SESSION_TOKEN,
             },
             ("message",),
         ),
@@ -351,7 +308,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "Spendable token balances of the signed-in CoinFello automation wallet, "
             "sorted by USD value, with a totalValueUsd. DeFi positions are separate: "
             "use coinfello_positions.",
-            {"chain_ids": _CHAIN_IDS, "session_token": _SESSION_TOKEN},
+            {"chain_ids": _CHAIN_IDS},
         ),
         _read("get_balances"),
     ),
@@ -362,7 +319,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "Every position of the CoinFello automation wallet in three sections: "
             "defi (LP, lending, staking), hyperliquid (perps, spot, vaults, resting "
             "orders) and polymarket. One source being down does not fail the others.",
-            {"session_token": _SESSION_TOKEN},
+            {},
         ),
         _read("get_positions"),
     ),
@@ -372,7 +329,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "coinfello_lp_positions",
             "Liquidity-pool positions of the CoinFello automation wallet with their "
             "price ranges and unclaimed fees, sorted by USD value.",
-            {"session_token": _SESSION_TOKEN},
+            {},
         ),
         _read("get_lp_positions"),
     ),
@@ -382,7 +339,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
             "coinfello_open_orders",
             "Resting Hyperliquid orders (TP/SL and limits) of the CoinFello "
             "automation wallet.",
-            {"session_token": _SESSION_TOKEN},
+            {},
         ),
         _read("get_open_orders"),
     ),
@@ -397,7 +354,6 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
                 "before": {**_STRING, "description": "nextCursor from a previous call, for older rows"},
                 "chain_ids": _CHAIN_IDS,
                 "fills_since_hours": {**_INT, "description": "How far back to read fills, in hours (default 168)"},
-                "session_token": _SESSION_TOKEN,
             },
         ),
         _read("get_activity"),
@@ -417,7 +373,6 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
                 "to_token": _TOKEN("to"),
                 "amount": {**_STRING, "description": "Amount in whole tokens, e.g. \"1.5\""},
                 "slippage": {**_NUMBER, "description": "Slippage as a fraction (0.005 = 0.5%, the default)"},
-                "session_token": _SESSION_TOKEN,
             },
             ("from_chain_id", "from_token", "to_token", "amount"),
         ),
@@ -508,7 +463,6 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
                 "token": {**_STRING, "description": "Token symbol to deposit, e.g. \"USDC\" or \"ETH\""},
                 "chain_ids": _CHAIN_IDS,
                 "limit": {**_INT, "description": "How many to return (default 10, max 50)"},
-                "session_token": _SESSION_TOKEN,
             },
             ("token",),
         ),
@@ -534,7 +488,6 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
                         "required": ["chain_id", "token"],
                     },
                 },
-                "session_token": _SESSION_TOKEN,
             },
             ("tokens",),
         ),

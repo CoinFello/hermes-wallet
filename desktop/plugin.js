@@ -1726,67 +1726,57 @@ function closeEmbedTabs() {
   }
 }
 
-// -- signed-out: browser-first sign-in ------------------------------------------
+// -- signed-out: Hermes's own OAuth sign-in -----------------------------------------
+//
+// CoinFello sign-in is the plugin's `oauth:` entry: the human runs
+// `hermes auth add coinfello:coinfello` once in a terminal (Hermes refuses it
+// from the pane, an agent or a gateway), approves on CoinFello in their
+// browser, and Hermes keeps the grant. The pane never sees a token: it shows
+// the command and checks every few seconds whether requests now go through.
+function HermesSignIn({ ctx, status, refresh }) {
+  const command = status.sign_in_command || 'hermes auth add coinfello:coinfello'
+  const envName = status.client_id_env || 'COINFELLO_OAUTH_CLIENT_ID'
+  const envLine = `echo '${envName}=${status.client_id || 'coinfello-hermes'}' >> "$(hermes config env-path)"`
 
-// The approval page's steps, from the backend (coinfello_core.sign_in_steps),
-// so the pane and the agent always describe the same order: open the page,
-// sign in to CoinFello, type the code, choose access, approve.
-function PendingSignIn({ ctx, status, refresh, upgrade }) {
-  const [error, setError] = useState('')
-  const code = status.pending_user_code
-  const url = status.pending_approval_url
-  const steps = status.sign_in_steps || []
-
-  // While a browser approval is outstanding, poll for the finished sign-in.
   useEffect(() => {
-    if (!status.pending_approval_id) return undefined
-    const timer = setInterval(async () => {
-      try {
-        const result = await ctx.rest('/approval', { method: 'POST', body: {} })
-        if (result && result.status === 'signed_in') refresh()
-        else if (result && result.ok === false) {
-          setError(errorOf(result, 'Sign-in failed'))
-          await ctx.rest('/cancel-sign-in', { method: 'POST', body: {} })
-          refresh()
-        }
-      } catch {
-        // transient: keep polling
-      }
-    }, 5000)
+    const timer = setInterval(() => refresh(), 5000)
     return () => clearInterval(timer)
-  }, [status.pending_approval_id, ctx, refresh])
+  }, [refresh])
 
-  const cancel = async () => {
-    await ctx.rest('/cancel-sign-in', { method: 'POST', body: {} })
-    refresh()
-  }
+  const commandRow = (text, label) =>
+    jsxs('div', {
+      className: cn(row, 'rounded-md border border-(--ui-stroke-secondary) px-2 py-1.5'),
+      children: [
+        jsx('code', { className: 'min-w-0 flex-1 truncate font-mono text-[0.6875rem] select-all', children: text }),
+        jsx(CopyButton, { text, appearance: 'icon', label }),
+      ],
+    })
 
   return jsxs('div', {
-    className: 'flex flex-col gap-2 rounded-md border border-(--ui-stroke-secondary) p-2',
+    className: 'flex flex-col gap-2',
     children: [
-      jsx('div', { className: 'text-xs font-medium', children: upgrade ? 'Enable trading' : 'Finish signing in' }),
-      jsxs('ol', {
-        className: cn('flex list-decimal flex-col gap-1 pl-4 text-xs', muted),
-        children: [
-          // Step 1 is "open the page": a button here instead of the URL.
-          jsx('li', {
-            children: jsx(Button, { size: 'sm', variant: 'outline', onClick: () => ctx.os.openExternal(url), children: 'Open the sign-in page' }),
-          }),
-          ...steps.slice(1).map((step, index) =>
-            jsx('li', { children: step.startsWith('When the page asks for your agent') ? 'Then type this code when the page asks for it:' : step }, index),
-          ),
-        ],
+      jsx('div', {
+        className: cn('text-xs', muted),
+        children:
+          'Sign in once from a terminal on this computer. It opens CoinFello in your browser, where you choose what your agent may do: read only, or trade up to a daily limit.',
       }),
-      jsx('div', { className: 'rounded-md border border-(--ui-stroke-secondary) py-2 text-center font-mono text-lg tracking-widest select-all', children: code }),
-      jsx('div', { className: cn('text-[0.6875rem]', muted), children: 'Only approve if the page says the request came from you, just now.' }),
+      commandRow(command, 'Copy sign-in command'),
+      status.account_hint
+        ? jsx('div', { className: cn('text-[0.6875rem]', muted), children: `Last signed in as ${status.account_hint}` })
+        : null,
+      jsx('div', {
+        className: cn('text-[0.6875rem]', muted),
+        children: `If Hermes says ${envName} is missing, run this first:`,
+      }),
+      commandRow(envLine, 'Copy client id command'),
       jsxs('div', {
         className: row,
         children: [
-          jsx('span', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for approval…' }),
-          jsx(Button, { size: 'sm', variant: 'ghost', onClick: cancel, children: 'Cancel' }),
+          jsx('span', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for sign-in…' }),
+          jsx(Button, { size: 'sm', variant: 'ghost', onClick: refresh, children: 'Check now' }),
         ],
       }),
-      error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
+      status.error ? jsx('div', { className: cn('text-xs', down), children: status.error }) : null,
     ],
   })
 }
@@ -1962,17 +1952,10 @@ function TradingAllowance({ ctx, status, refresh, message, setMessage }) {
     setError('')
     setMessage('')
     try {
-      // Servers without adjustable limits: the only way to trade is a new sign-in.
-      if (!status.can_adjust_limit) {
-        const result = await ctx.rest('/connect', { method: 'POST', body: {} })
-        if (!result || result.ok === false) setError(errorOf(result, 'Could not start sign-in'))
-        else ctx.os.openExternal(result.approval_url)
-      } else {
-        const result = await ctx.rest('/limit', { method: 'POST', body: { limit_usd: limit } })
-        if (!result || result.ok === false) setError(errorOf(result, 'Could not change the allowance'))
-        else if (result.status === 'approval_required') ctx.os.openExternal(result.approval_url)
-        else setMessage(result.user_message || 'Allowance updated.')
-      }
+      const result = await ctx.rest('/limit', { method: 'POST', body: { limit_usd: limit } })
+      if (!result || result.ok === false) setError(errorOf(result, 'Could not change the allowance'))
+      else if (result.status === 'approval_required') ctx.os.openExternal(result.approval_url)
+      else setMessage(result.user_message || 'Allowance updated.')
       setEditing(false)
       refresh()
     } catch (exc) {
@@ -2189,144 +2172,6 @@ function Settings({ ctx, status, refresh, onBack, onSignOut, message, setMessage
   })
 }
 
-function BrowserSignIn({ ctx, status, refresh }) {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const pendingCode = status.pending_user_code
-
-  const start = async () => {
-    setBusy(true)
-    setError('')
-    try {
-      const result = await ctx.rest('/connect', { method: 'POST', body: {} })
-      if (!result || result.ok === false) setError(errorOf(result, 'Could not start sign-in'))
-      else {
-        ctx.os.openExternal(result.approval_url)
-        refresh()
-      }
-    } catch (exc) {
-      setError(String(exc))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (pendingCode) return jsx(PendingSignIn, { ctx, status, refresh, upgrade: false })
-
-  const forgetAccount = async () => {
-    await ctx.rest('/forget-account', { method: 'POST', body: {} })
-    refresh()
-  }
-
-  return jsxs('div', {
-    className: 'flex flex-col gap-2',
-    children: [
-      jsx('div', {
-        className: cn('text-xs', muted),
-        children:
-          'Sign in once in your browser with your CoinFello email or phone. ' +
-          'Approving lets Fello act on your automations wallet, the same permission as the Automation Wallet in the app (revocable there).',
-      }),
-      status.account_hint
-        ? jsxs('div', {
-            className: cn(row, 'text-[0.6875rem]', muted),
-            children: [
-              jsx('span', { children: `Signing in as ${status.account_hint}` }),
-              jsx(Button, { size: 'sm', variant: 'ghost', onClick: forgetAccount, children: 'Use a different account' }),
-            ],
-          })
-        : null,
-      jsx('div', {
-        className: cn('text-[0.6875rem]', muted),
-        children: 'If your browser asks to connect or sign with a wallet like MetaMask, cancel it: that is a different account.',
-      }),
-      jsx(Button, { size: 'sm', loading: busy, onClick: start, children: 'Sign in with CoinFello' }),
-      error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
-    ],
-  })
-}
-
-// Fallback for CoinFello servers deployed before browser sign-in.
-function EmailSignIn({ ctx, status, refresh }) {
-  const [stage, setStage] = useState('email')
-  const [email, setEmail] = useState(status.email || '')
-  const [code, setCode] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    if (!status.pending_approval_id) return undefined
-    const timer = setInterval(async () => {
-      try {
-        const result = await ctx.rest('/approval', { method: 'POST', body: {} })
-        if (result && result.status === 'signed_in') refresh()
-      } catch {
-        // keep polling
-      }
-    }, 5000)
-    return () => clearInterval(timer)
-  }, [status.pending_approval_id, ctx, refresh])
-
-  const run = async (path, body, onOk) => {
-    setBusy(true)
-    setError('')
-    try {
-      const result = await ctx.rest(path, { method: 'POST', body })
-      if (!result || result.ok === false) setError(errorOf(result, 'Sign-in failed'))
-      else onOk(result)
-    } catch (exc) {
-      setError(String(exc))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  if (status.pending_approval_id) {
-    return jsxs('div', {
-      className: 'flex flex-col gap-2',
-      children: [
-        jsx('div', { className: cn('text-xs', muted), children: 'This wallet needs a one-time approval in your browser.' }),
-        jsx(Button, { size: 'sm', onClick: () => ctx.os.openExternal(status.pending_approval_url), children: 'Open approval page' }),
-        jsx('div', { className: cn('animate-pulse text-xs', muted), children: 'Waiting for approval…' }),
-      ],
-    })
-  }
-
-  const field =
-    stage === 'email'
-      ? jsx(Input, { value: email, type: 'email', autoFocus: true, placeholder: 'you@example.com', onChange: (e) => setEmail(e.target.value) })
-      : jsx(Input, { value: code, inputMode: 'numeric', autoFocus: true, maxLength: 6, placeholder: '000000', onChange: (e) => setCode(e.target.value) })
-  const canSubmit = !busy && (stage === 'email' ? !!email : code.length === 6)
-  const submit = () => {
-    if (!canSubmit) return
-    if (stage === 'email') run('/connect', { email }, () => setStage('code'))
-    else
-      run('/verify', { email, code }, (result) => {
-        if (result.status === 'approval_required') ctx.os.openExternal(result.approval_url)
-        refresh()
-      })
-  }
-  // A real <form>: Enter submits from either field, like any sign-in form.
-  return jsxs('form', {
-    className: 'flex flex-col gap-2',
-    onSubmit: (event) => {
-      event.preventDefault()
-      submit()
-    },
-    children: [
-      jsx('div', { className: cn('text-xs', muted), children: stage === 'email' ? 'Sign in with your CoinFello email.' : `Enter the 6-digit code sent to ${email}.` }),
-      field,
-      jsx(Button, {
-        type: 'submit',
-        size: 'sm',
-        loading: busy,
-        disabled: !canSubmit,
-        children: stage === 'email' ? 'Send login code' : 'Verify',
-      }),
-      error ? jsx('div', { className: cn('text-xs', down), children: error }) : null,
-    ],
-  })
-}
 
 // -- MCP App cards: the host half of the MCP Apps bridge -------------------------
 //
@@ -2914,21 +2759,17 @@ function Pane({ ctx }) {
     body = jsxs(Fragment, {
       children: [
         jsx(Cards, { ctx }),
-        data.pending_approval_id ? jsx(PendingSignIn, { ctx, status: data, refresh, upgrade: !!data.pending_upgrade }) : null,
         jsx(Hero, {
           ctx,
           onSend: (portfolio) => setView({ kind: 'send', portfolio }),
           onSwap: () => setView({ kind: 'swap' }),
           onEarn: () => setView({ kind: 'earn' }),
         }),
-        data.pending_approval_id
-          ? null
-          : jsx(AllowanceNotice, { status: data, message: allowanceMessage, onOpen: () => setView({ kind: 'settings' }) }),
+        jsx(AllowanceNotice, { status: data, message: allowanceMessage, onOpen: () => setView({ kind: 'settings' }) }),
         jsx(Assets, { ctx, tab: homeTab, setTab: setHomeTab }),
       ],
     })
-  } else if (data.sign_in_mode === 'email') body = jsx(EmailSignIn, { ctx, status: data, refresh })
-  else body = jsx(BrowserSignIn, { ctx, status: data, refresh })
+  } else body = jsx(HermesSignIn, { ctx, status: data, refresh })
 
   const readOnly = connected && data.access && data.access !== 'unknown' && data.access !== 'trade'
   const settingsOpen = view.kind === 'settings'

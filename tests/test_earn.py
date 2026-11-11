@@ -34,7 +34,7 @@ NODE = shutil.which("node")
 def server(mock_mcp, isolated_state, monkeypatch, tmp_path):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xWALLET"})
     mock_mcp.mock_state.update(cards=True, actions=True, embed_scopes=("swap", "earn"))
     cards.reset_for_tests()
     monkeypatch.setattr(cards, "cards_dir", lambda: tmp_path / "cards")
@@ -120,7 +120,7 @@ def test_the_portfolio_links_earn_on_the_app(server):
 @pytest.fixture
 def read_only(server):
     server.mock_state["access_mode"] = True
-    core.save_state({"session_token": "tok-old", "access": "read_only"})
+    core.save_state({"signed_in": True, "test_grant": "tok-old", "access": "read_only"})
     return server
 
 

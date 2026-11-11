@@ -51,17 +51,8 @@ def _safe(action: Callable[[], Any]) -> Any:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
-class VerifyBody(BaseModel):
-    email: str
-    code: str
-
-
-class ApprovalBody(BaseModel):
-    approval_id: Optional[str] = None
-
-
 class ConnectBody(BaseModel):
-    """``email`` only matters on servers without browser sign-in."""
+    """Accepted for older panes; sign-in is `hermes auth add`, run by the human."""
 
     email: Optional[str] = None
 
@@ -74,16 +65,6 @@ def status():
 @router.post("/connect")
 def connect(body: ConnectBody):
     return _safe(lambda: core.connect(body.email or ""))
-
-
-@router.post("/verify")
-def verify(body: VerifyBody):
-    return _safe(lambda: core.verify(body.email, body.code))
-
-
-@router.post("/approval")
-def approval(body: ApprovalBody):
-    return _safe(lambda: core.poll_approval(body.approval_id))
 
 
 @router.post("/cancel-sign-in")

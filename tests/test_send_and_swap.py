@@ -18,7 +18,7 @@ import coinfello_core as core
 def server(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xWALLET"})
     mock_mcp.mock_state["actions"] = True
     return mock_mcp
 
@@ -81,7 +81,7 @@ def test_buttons_follow_server_capabilities(server, mock_mcp):
 def test_older_servers_disable_send_and_swap(mock_mcp, isolated_state, monkeypatch):
     host, port = mock_mcp.server_address[:2]
     monkeypatch.setattr(core, "mcp_url", lambda: f"http://{host}:{port}/api/mcp/mcp")
-    core.save_state({"session_token": "tok-live", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-live", "wallet_address": "0xWALLET"})
     model = core.portfolio()
     assert model["can_send"] is False and model["can_swap"] is False
     with pytest.raises(RuntimeError, match="needs a CoinFello server update"):

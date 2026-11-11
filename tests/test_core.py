@@ -15,63 +15,11 @@ def live(mock_mcp, isolated_state, monkeypatch):
     return mock_mcp
 
 
-def test_connect_sends_code(live):
-    result = core.connect("user@example.com")
-    assert result["ok"] is True
-    assert [(name, args) for name, args in live.mock_state["tool_calls"]] == [
-        ("privy_send_login_code", {"email": "user@example.com"})
-    ]
-
-
-def test_connect_validates_email(live):
-    with pytest.raises(ValueError):
-        core.connect("not-an-email")
-
-
-def test_verify_signs_in_and_stores_token(live):
-    core.connect("user@example.com")
-    result = core.verify("user@example.com", "111111")
-    assert result["status"] == "signed_in"
-    assert result["wallet_address"] == "0xWALLET"
-    state = core.load_state()
-    assert state["session_token"] == "tok-abc123"
-    assert state["email"] == "user@example.com"
-
-
-def test_verify_bad_code_surfaces_server_message(live):
-    core.connect("user@example.com")
-    with pytest.raises(core.ToolError) as excinfo:
-        core.verify("user@example.com", "999999")
-    assert "wrong code" in str(excinfo.value)
-    assert not core.signed_in()
-
-
-def test_verify_code_format_validated(live):
-    with pytest.raises(ValueError):
-        core.verify("user@example.com", "12")
-
-
-def test_approval_flow(live):
-    core.connect("approval@example.com")
-    result = core.verify("approval@example.com", "111111")
-    assert result["status"] == "approval_required"
-    assert result["approval_url"].endswith("/authorize")
-    assert not core.signed_in()
-
-    pending = core.poll_approval(result["approval_id"])
-    assert pending["status"] == "pending"
-
-    done = core.poll_approval("done-approval")
-    assert done["status"] == "signed_in"
-    assert core.signed_in()
-
-
 def test_status_reflects_state(live):
     offline = core.status()
     assert offline["connected"] is False
 
-    core.connect("user@example.com")
-    core.verify("user@example.com", "111111")
+    core.save_state({"test_grant": "tok-abc123"})  # `hermes auth add` ran
     online = core.status()
     assert online["connected"] is True
     assert online["wallet_address"] == "0xWALLET"
@@ -84,15 +32,43 @@ def test_read_requires_session(live):
 
 
 def test_read_with_session(live):
-    core.connect("user@example.com")
-    core.verify("user@example.com", "111111")
+    core.save_state({"test_grant": "tok-abc123"})
     result = core.call("get_balances", {})
+    assert core.signed_in()
     assert result["totalValueUsd"] == 2500.0
 
 
 def test_disconnect_clears_state(live):
-    core.connect("user@example.com")
-    core.verify("user@example.com", "111111")
+    core.save_state({"signed_in": True, "test_grant": "tok-abc123"})
     result = core.disconnect()
     assert result["ok"] is True
     assert not core.signed_in()
+
+def test_connect_without_a_grant_gives_the_hermes_command(live):
+    result = core.connect()
+    assert result["status"] == "sign_in_required"
+    assert result["command"] == "hermes auth add coinfello:coinfello"
+    assert "hermes auth add coinfello:coinfello" in result["user_message"]
+    assert "COINFELLO_OAUTH_CLIENT_ID=coinfello-hermes" in result["user_message"]
+
+
+def test_connect_with_a_grant_reports_the_sign_in(live):
+    core.save_state({"test_grant": "tok-abc123"})
+    result = core.connect()
+    assert result["status"] == "signed_in"
+    assert result["wallet_address"] == "0xWALLET"
+
+
+def test_a_lost_grant_flips_the_cached_flag(live):
+    core.save_state({"signed_in": True})  # cached, but Hermes holds no grant
+    with pytest.raises(core.NotSignedIn) as excinfo:
+        core.call("get_balances", {})
+    assert "hermes auth add coinfello:coinfello" in str(excinfo.value)
+    assert not core.signed_in()
+
+
+def test_state_never_holds_a_token(live):
+    core.save_state({"test_grant": "tok-abc123"})
+    core.status()
+    stored = {k: v for k, v in core.load_state().items() if k != "test_grant"}
+    assert "tok-abc123" not in str(stored)

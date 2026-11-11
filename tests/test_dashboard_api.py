@@ -49,15 +49,12 @@ def test_status_no_query_params_required(client):
 
 
 def test_full_sign_in_over_http(client):
-    sent = client.post(f"{BASE}/connect", json={"email": "user@example.com"})
+    sent = client.post(f"{BASE}/connect", json={})
     assert sent.status_code == 200, sent.text
-    assert sent.json()["ok"] is True
+    assert sent.json()["status"] == "sign_in_required"
+    assert sent.json()["command"] == "hermes auth add coinfello:coinfello"
 
-    verified = client.post(
-        f"{BASE}/verify", json={"email": "user@example.com", "code": "111111"}
-    )
-    assert verified.status_code == 200, verified.text
-    assert verified.json()["status"] == "signed_in"
+    core.save_state({"test_grant": "tok-abc123"})  # the human ran `hermes auth add`
 
     status = client.get(f"{BASE}/status").json()
     assert status["connected"] is True
@@ -75,51 +72,26 @@ def test_full_sign_in_over_http(client):
 
     out = client.post(f"{BASE}/disconnect")
     assert out.status_code == 200, out.text
+    assert out.json()["remove_from_hermes"] == "hermes auth logout coinfello:coinfello"
+    # CoinFello revoked the grant; the mock keeps accepting it, so drop it as
+    # Hermes would after its next refresh is refused.
+    core.save_state({"test_grant": ""})
     assert client.get(f"{BASE}/status").json()["connected"] is False
 
 
-def test_approval_route(client):
-    client.post(f"{BASE}/connect", json={"email": "approval@example.com"})
-    verified = client.post(
-        f"{BASE}/verify", json={"email": "approval@example.com", "code": "111111"}
-    ).json()
-    assert verified["status"] == "approval_required"
-
-    pending = client.post(f"{BASE}/approval", json={"approval_id": verified["approval_id"]})
-    assert pending.status_code == 200, pending.text
-    assert pending.json()["status"] == "pending"
-
-    # body with no approval_id falls back to the stored pending one
-    stored = client.post(f"{BASE}/approval", json={})
-    assert stored.status_code == 200, stored.text
-
-
 def test_failures_fold_into_ok_false(client):
-    bad = client.post(f"{BASE}/verify", json={"email": "user@example.com", "code": "12"})
-    assert bad.status_code == 200
-    assert bad.json() == {"ok": False, "error": "the login code is 6 digits"}
-
     unsigned = client.get(f"{BASE}/portfolio")
     assert unsigned.status_code == 200
     assert unsigned.json()["ok"] is False
 
 
-def test_browser_sign_in_over_http(client, mock_mcp):
-    mock_mcp.mock_state["browser_sign_in"] = True
-    started = client.post(f"{BASE}/connect", json={})
-    assert started.status_code == 200, started.text
-    assert started.json()["user_code"] == "WDJB-MJHT"
-
+def test_status_over_http_names_the_hermes_sign_in(client):
     status = client.get(f"{BASE}/status").json()
-    assert status["sign_in_mode"] == "browser"
-    assert status["pending_user_code"] == "WDJB-MJHT"
-
-    mock_mcp.mock_state["browser_approved"] = True
-    done = client.post(f"{BASE}/approval", json={})
-    assert done.json()["status"] == "signed_in"
-
-    cancelled = client.post(f"{BASE}/cancel-sign-in")
-    assert cancelled.status_code == 200
+    assert status["connected"] is False
+    assert status["sign_in_mode"] == "hermes"
+    assert status["sign_in_command"] == "hermes auth add coinfello:coinfello"
+    assert status["client_id"] == "coinfello-hermes"
+    assert client.post(f"{BASE}/verify", json={}).status_code == 404
 
 
 def test_wallet_requires_sign_in(client):
@@ -130,8 +102,7 @@ def test_wallet_requires_sign_in(client):
 
 def test_send_and_swap_routes_over_http(client, mock_mcp):
     mock_mcp.mock_state["actions"] = True
-    client.post(f"{BASE}/connect", json={"email": "user@example.com"})
-    client.post(f"{BASE}/verify", json={"email": "user@example.com", "code": "111111"})
+    core.save_state({"test_grant": "tok-abc123"})
 
     prepared = client.post(f"{BASE}/send/prepare", json={
         "chain_id": 8453, "token": "0xUSDC", "amount": "25.5",
@@ -154,8 +125,7 @@ def test_send_and_swap_routes_over_http(client, mock_mcp):
 
 def test_send_validation_errors_fold_into_ok_false(client, mock_mcp):
     mock_mcp.mock_state["actions"] = True
-    client.post(f"{BASE}/connect", json={"email": "user@example.com"})
-    client.post(f"{BASE}/verify", json={"email": "user@example.com", "code": "111111"})
+    core.save_state({"test_grant": "tok-abc123"})
     bad = client.post(f"{BASE}/send/prepare", json={
         "chain_id": 8453, "token": "0xUSDC", "amount": "1", "recipient": "bob"})
     assert bad.status_code == 200
@@ -165,8 +135,7 @@ def test_send_validation_errors_fold_into_ok_false(client, mock_mcp):
 
 def test_send_amounts_over_http(client, mock_mcp, monkeypatch):
     mock_mcp.mock_state["actions"] = True
-    client.post(f"{BASE}/connect", json={"email": "user@example.com"})
-    client.post(f"{BASE}/verify", json={"email": "user@example.com", "code": "111111"})
+    core.save_state({"test_grant": "tok-abc123"})
     body = {"chain_id": 8453, "token": "0xUSDC", "recipient": "0x1111111111111111111111111111111111111111"}
 
     assert client.post(f"{BASE}/send/prepare", json={**body, "amount": ".001"}).json()["ok"] is True
@@ -183,7 +152,7 @@ def test_send_amounts_over_http(client, mock_mcp, monkeypatch):
 
 def test_limit_routes_over_http(client, mock_mcp):
     mock_mcp.mock_state.update(browser_sign_in=True, actions=True, access_mode=True, limit_mode=True)
-    core.save_state({"session_token": "tok-trade", "wallet_address": "0xWALLET"})
+    core.save_state({"signed_in": True, "test_grant": "tok-trade", "wallet_address": "0xWALLET"})
     client.get(f"{BASE}/status")
 
     lowered = client.post(f"{BASE}/limit", json={"limit_usd": 100})

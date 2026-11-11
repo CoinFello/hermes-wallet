@@ -781,15 +781,47 @@ def mock_mcp(monkeypatch):
     server.server_close()
 
 
+def bearer_transport(token):
+    """A transport that attaches ``token`` the way Hermes attaches the grant."""
+    import coinfello_mcp
+
+    def send(url, payload, headers, timeout):
+        return coinfello_mcp.anonymous_transport(
+            url, payload, {**dict(headers), "Authorization": f"Bearer {token}"}, timeout
+        )
+
+    return send
+
+
+def fake_hermes_transport(url, payload, headers, timeout):
+    import coinfello_mcp
+    import coinfello_state
+
+    grant = (coinfello_state.load_state().get("test_grant") or "").strip()
+    if not grant:
+        raise coinfello_mcp.SignInRequired(
+            "Not signed in to coinfello for plugin 'coinfello' in this Hermes profile."
+        )
+    return coinfello_mcp.anonymous_transport(
+        url, payload, {**dict(headers), "Authorization": f"Bearer {grant}"}, timeout
+    )
+
+
 @pytest.fixture
 def isolated_state(monkeypatch, tmp_path):
     """Force the file fallback for state storage, in a temp directory."""
     import coinfello_core
     import coinfello_state
 
+    import coinfello_mcp
+
     fallback = tmp_path / "state.json"
     monkeypatch.setattr(coinfello_state, "FALLBACK_FILE", fallback)
-    monkeypatch.setattr(coinfello_state, "_auth_helpers", lambda: None)
+    monkeypatch.setattr(coinfello_state, "_plugin_state", lambda: None)
+    # Stand-in for Hermes's credentialed_provider_request: Hermes attaches the
+    # grant from `hermes auth add`; here a test grants one with
+    # `test_grant` in the state (the plugin itself never reads it).
+    monkeypatch.setattr(coinfello_mcp, "default_transport", lambda: fake_hermes_transport)
     # Capability probes are cached per process; every test starts cold.
     coinfello_core._capabilities.update(url=None, tools=frozenset(), at=0.0)
     yield fallback

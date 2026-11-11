@@ -6,7 +6,11 @@ over your automation wallet (balances, positions, LP ranges, open orders,
 activity, prices, yields, swap/bridge quotes) plus **Fello**, CoinFello's DeFi
 agent, which can execute on-chain actions for you.
 
-Includes a desktop pane: one-click browser sign-in, the automations wallet
+Sign-in is Hermes's own OAuth: CoinFello is declared under `oauth:` in
+`plugin.yaml`, you run `hermes auth add coinfello:coinfello` once, and Hermes
+stores, refreshes and attaches the grant. The plugin never sees a token.
+
+Includes a desktop pane: the sign-in command to copy, the automations wallet
 (copy + QR to fund it), balances per network shaped like the CoinFello
 Portfolio view, and CoinFello's MCP App cards (portfolio, quotes,
 automations, yields, ...) when the agent shows one.
@@ -59,21 +63,27 @@ Restart Hermes. The MCP tools appear as `coinfello_*`; the desktop pane
 appears after **Reload desktop plugins** (⌘K) — the desktop half is opt-in
 and inventories under Capabilities → Plugins.
 
-### Configuration
+### Sign in
 
-| Env var | Default | Meaning |
-|---|---|---|
-| `COINFELLO_MCP_URL` | `https://app.coinfello.com/api/mcp` | MCP endpoint (streamable HTTP). Point it at a preview deployment to test there. |
+```bash
+# CoinFello's public OAuth client id for this plugin (not a secret; PKCE protects the code)
+echo 'COINFELLO_OAUTH_CLIENT_ID=coinfello-hermes' >> "$(hermes config env-path)"
+hermes auth add coinfello:coinfello
+```
 
-Set it in `~/.hermes/.env` or the process environment. The plugin's session
-token is stored under `providers.coinfello` in the profile's `auth.json` —
-never in `config.yaml`.
+`hermes auth add` opens CoinFello in your browser. Sign in, choose what the
+agent may do (read only, or trade up to a daily limit), and approve. Hermes
+then keeps the grant: it refreshes it before it expires, sends it only to
+`app.coinfello.com`, and the plugin's requests go through Hermes's
+`credentialed_provider_request`. Check it with
+`hermes auth status coinfello:coinfello`. Hermes refuses `hermes auth add` from
+an agent session, the messaging gateway or cron, so the agent can only tell you
+the command (`coinfello_connect`), never run it.
 
-> Note: token storage uses the same (currently private) `hermes_cli.auth`
-> helpers the official Spotify plugin uses — there is no public writer for
-> provider state yet. `hermes plugins validate` passes, with a warning; if a
-> Hermes release moves those helpers, the plugin falls back to a 0600 state
-> file inside the plugin directory.
+The sign-in is an OAuth 2.1 authorization-code grant with PKCE against
+CoinFello (`/api/auth/mcp/authorize`, `/api/auth/mcp/token`). Access tokens
+last an hour; refresh tokens are single-use, and a grant ends 180 days after
+you approve it.
 
 ## The pane
 
@@ -106,25 +116,12 @@ colors** switches them to CoinFello's yellow (saved per app with
 `ctx.storage`). CoinFello also contributes the logo, serif portfolio figures,
 round token icons and rounded cards.
 
-## Sign-in flow
+## Signing out
 
-**Browser-first** (CoinFello servers with `start_browser_sign_in`):
-
-1. **Sign in with CoinFello** opens `/authorize` in your browser and the pane
-   shows a code.
-2. Sign in to CoinFello there (skipped if you already are), check the code
-   matches, approve.
-3. The pane picks the session up on its own. New and existing accounts take
-   the same path.
-
-**Sessions renew themselves**: within two weeks of expiry the plugin swaps
-the token for a fresh 30-day one (`renew_session`), so a plugin in regular
-use never signs in again.
-
-**Older servers** (no browser sign-in yet) fall back automatically to the
-email-code flow: code by email, then a one-time browser approval for wallets
-that already exist. The plugin detects which flow the server offers through
-`tools/list`.
+`coinfello_disconnect` (or **Sign out** in Settings) asks CoinFello to revoke
+the grant, which ends it at once for every copy of its tokens. Run
+`hermes auth logout coinfello:coinfello` to also remove it from Hermes. Turning
+off the Automation Wallet in the CoinFello app ends it too.
 
 ## Trading from the agent
 
@@ -206,7 +203,7 @@ deposit's prepare and confirm.
 prepared (the server's summary, kept with the card record, is what the
 confirmation shows), once and before it expires.
 `cancel_automation` runs only for an automation the card listed. Sign-out,
-Fello, sign-in, session renewal, embed tokens and daily-limit changes are
+Fello, sign-in, embed tokens and daily-limit changes are
 never relayed, nor is anything not in the table. Credential-like keys are
 stripped from arguments and results in both directions.
 
@@ -264,12 +261,20 @@ window but the host's own frame are ignored; heights are clamped to
 
 ## Security notes
 
-- The MCP session token can move funds from the automation wallet. Treat it
-  like a password; revoke it in the CoinFello app (Automation Wallet) at any
-  time — revocation ends the session immediately.
+- The plugin stores no credential and reads none: no `.env`, no `auth.json`.
+  Hermes holds the CoinFello OAuth grant and attaches it to the plugin's
+  requests, only for `app.coinfello.com`. The grant can move funds within the
+  daily limit you chose; revoke it with `coinfello_disconnect`, or in the
+  CoinFello app (Automation Wallet), which ends it immediately.
+- Stored by the plugin: non-secret state in Hermes's plugin store
+  (`plugin-data/coinfello/state.json`): whether the last request was signed
+  in, the wallet address, the access level and a pending limit change.
 - `coinfello_chat` executes on-chain actions **without further
   confirmation** on the CoinFello side, so Hermes asks you to approve each
-  message. The CoinFello MCP server currently has no server-side spend cap.
+  message. CoinFello enforces the daily limit you approved server-side.
+- Unattended runs (cron, the messaging gateway): sign-in never waits on a
+  person; without a grant every tool fails at once with the sign-in command.
+  `coinfello_execute` and `coinfello_chat` need Hermes's approval prompt.
 - `coinfello_execute` runs only intents this Hermes process prepared, once,
   after you approve the server's summary in Hermes.
 - Fast reads (`get_*`) are read-only.
@@ -281,14 +286,16 @@ or other request made only to be counted.
 
 It talks to CoinFello's MCP server (`https://app.coinfello.com/api/mcp`), and
 while the desktop pane is open it refreshes status and balances every 30-60
-seconds. Every request names the client in its `User-Agent`
+seconds (every 5 seconds while it waits for you to sign in). Background work:
+the pane's polling while open, and one background request to revoke the
+grant when you sign out from the pane. Every request names the client in its `User-Agent`
 (`coinfello-hermes-plugin/<version> (Hermes; ...)`). **CoinFello records usage
 of its service on its servers**, under the
 [CoinFello privacy policy](https://coinfello.com/privacy-policy): at most once a day
 per signed-in session, an activity event with your CoinFello account id, the
 session's automation wallet address, the session id, and the client name and
 version. That is how CoinFello counts daily and monthly active users and
-installs. Signing out ends the session; the plugin keeps no other identifier.
+installs. Signing out ends the grant; the plugin keeps no other identifier.
 
 Other network calls: token and network icons from MetaMask's icon service
 (`static.cx.metamask.io`) and CoinFello's site, LI.FI's status API for older
@@ -317,8 +324,8 @@ network or real credentials involved.
 ├── pyproject.toml         Python deps (segno), installed by Hermes plugin admission
 ├── __init__.py            register(ctx) — registers the agent tools
 ├── coinfello_mcp.py       stdlib MCP streamable-HTTP client
-├── coinfello_state.py     endpoint config + session token storage
-├── coinfello_core.py      service layer (sign-in, renewal, reads, status)
+├── coinfello_state.py     endpoint + non-secret pane state (no credentials)
+├── coinfello_core.py      service layer (sign-in steps, reads, status)
 ├── coinfello_portfolio.py pane portfolio model, ported from the web Portfolio view
 ├── coinfello_tools.py     tool schemas + handlers
 ├── coinfello_trades.py    prepare/execute, the approval hook, transfer status

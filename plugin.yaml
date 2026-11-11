@@ -1,24 +1,23 @@
 name: coinfello
 label: CoinFello
 kind: standalone
-version: 0.2.0
+version: 0.3.0
 author: CoinFello
 homepage: https://github.com/CoinFello/coinfello-hermes-plugin
 description: >
-  CoinFello for Hermes Agent: sign in through the CoinFello MCP server
-  (Privy email code, assisted by the desktop pane) and give the agent fast
-  reads over the automation wallet (balances, positions, LP ranges, open
-  orders, activity, prices, yields, swap/bridge quotes) plus Fello,
-  CoinFello's DeFi agent, which can execute on-chain actions. Includes a
-  desktop pane for sign-in, wallet overview and sign-out, which also draws
-  CoinFello's MCP App cards (portfolio, quotes, automations, ...) the agent
-  shows with coinfello_show_card.
-requires_hermes: ">=0.21.0"
+  CoinFello for Hermes Agent: sign in to CoinFello with Hermes's own OAuth
+  (`hermes auth add coinfello:coinfello`; Hermes stores and refreshes the
+  grant, the plugin never sees a token) and give the agent fast reads over the
+  automation wallet (balances, positions, LP ranges, open orders, activity,
+  prices, yields, swap/bridge quotes) plus Fello, CoinFello's DeFi agent.
+  Trades go through Hermes's approval prompt and a daily limit the human sets
+  on CoinFello. Includes a desktop pane (wallet overview, send, swap, earn,
+  allowance) that also draws CoinFello's MCP App cards the agent shows with
+  coinfello_show_card.
+requires_hermes: ">=0.23.0"
 provides_tools:
   - coinfello_status
   - coinfello_connect
-  - coinfello_verify
-  - coinfello_poll_approval
   - coinfello_set_daily_limit
   - coinfello_limit_status
   - coinfello_disconnect
@@ -39,8 +38,21 @@ provides_tools:
   - coinfello_show_card
 provides_hooks:
   - pre_tool_call
+# CoinFello sign-in: OAuth 2.1 authorization code + PKCE against CoinFello's
+# MCP server. Hermes runs it (`hermes auth add coinfello:coinfello`), stores
+# and refreshes the grant, and attaches it only to requests the plugin makes
+# through credentialed_provider_request to the hosts below.
+oauth:
+  - id: coinfello
+    authorize_url: https://app.coinfello.com/api/auth/mcp/authorize
+    token_url: https://app.coinfello.com/api/auth/mcp/token
+    scopes:
+      - offline_access
+    client_id_env: COINFELLO_OAUTH_CLIENT_ID
+    hosts:
+      - app.coinfello.com
 optional_env:
-  - name: COINFELLO_MCP_URL
-    description: "CoinFello MCP endpoint (streamable HTTP). Default: https://app.coinfello.com/api/mcp"
-    prompt: "CoinFello MCP URL"
+  - name: COINFELLO_OAUTH_CLIENT_ID
+    description: "CoinFello's public OAuth client id for this plugin (not a secret): coinfello-hermes"
+    prompt: "CoinFello OAuth client id (enter coinfello-hermes)"
     password: false

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from conftest import bearer_transport
 import pytest
 
 import coinfello_mcp
@@ -110,17 +111,30 @@ def test_does_not_follow_a_redirect_to_another_host(mock_mcp):
 def test_same_host_redirect_is_followed(mock_mcp):
     host, port = mock_mcp.server_address[:2]
     client = CoinFelloMCP(f"http://{host}:{port}/old-path")
-    import urllib.error
-    from email.message import Message
+    assert client._same_host_redirect(308, {"Location": "/mcp"}) == f"http://{host}:{port}/mcp"
+    assert client._same_host_redirect(308, {"location": "https://evil.example/mcp"}) is None
+    assert client._same_host_redirect(302, {"Location": "/mcp"}) is None
 
-    headers = Message()
-    headers["Location"] = "/mcp"
-    err = urllib.error.HTTPError(client.url, 308, "Permanent Redirect", headers, None)
-    assert client._same_host_redirect(err) == f"http://{host}:{port}/mcp"
-    headers.replace_header("Location", "https://evil.example/mcp")
-    assert client._same_host_redirect(err) is None
-    err302 = urllib.error.HTTPError(client.url, 302, "Found", headers, None)
-    assert client._same_host_redirect(err302) is None
+
+def test_a_401_means_the_sign_in_is_gone(mock_mcp):
+    def unauthorized(url, payload, headers, timeout):
+        return 401, {}, b""
+
+    client = CoinFelloMCP("https://app.coinfello.com/api/mcp", transport=unauthorized)
+    with pytest.raises(coinfello_mcp.SignInRequired):
+        client.initialize()
+
+
+def test_requests_carry_no_credential_of_their_own():
+    """Hermes attaches the bearer; the plugin's own headers never hold one."""
+    seen = {}
+
+    def capture(url, payload, headers, timeout):
+        seen.update(headers)
+        return 200, {}, b'{"jsonrpc":"2.0","id":1,"result":{}}'
+
+    CoinFelloMCP("https://app.coinfello.com/api/mcp", transport=capture)._post({"jsonrpc": "2.0"})
+    assert not any(key.lower() == "authorization" for key in seen)
 
 
 def test_requests_name_the_plugin_and_its_manifest_version(mock_mcp):
@@ -137,6 +151,6 @@ def test_requests_name_the_plugin_and_its_manifest_version(mock_mcp):
     assert coinfello_mcp.USER_AGENT.startswith(f"coinfello-hermes-plugin/{version} ")
 
     host, port = mock_mcp.server_address[:2]
-    client = coinfello_mcp.CoinFelloMCP(f"http://{host}:{port}/mcp", session_token="tok-live")
+    client = coinfello_mcp.CoinFelloMCP(f"http://{host}:{port}/mcp", transport=bearer_transport("tok-live"))
     client.list_tools()
     assert mock_mcp.mock_state["user_agents"][-1] == coinfello_mcp.USER_AGENT

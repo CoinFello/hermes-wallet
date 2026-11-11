@@ -1,7 +1,7 @@
 """hermes-coinfello — CoinFello wallet + Fello DeFi agent tools for Hermes Agent.
 
-Signs in through the CoinFello MCP server (Privy email code, desktop pane
-assisted) and exposes the automation wallet to the agent: fast reads
+Signs in with Hermes's own OAuth (`hermes auth add coinfello:coinfello`; the
+plugin never holds a token) and exposes the automation wallet to the agent: fast reads
 (balances, positions, prices, yields, quotes) and Fello, CoinFello's DeFi
 agent, which can execute on-chain actions.
 
