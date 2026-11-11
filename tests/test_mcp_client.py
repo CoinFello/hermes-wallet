@@ -146,7 +146,7 @@ def test_requests_name_the_plugin_and_its_manifest_version(mock_mcp):
     import coinfello_mcp
 
     manifest = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text()
-    version = re.search(r"^version:\s*(\S+)", manifest, re.M).group(1)
+    version = re.search(r"^version:\s*(\S+)", manifest, re.M).group(1).strip("\"'")
     assert coinfello_mcp.CLIENT_INFO["version"] == version
     assert coinfello_mcp.USER_AGENT.startswith(f"coinfello-hermes-plugin/{version} ")
 

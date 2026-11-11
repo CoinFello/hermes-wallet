@@ -372,7 +372,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         _schema(
             "coinfello_quote",
             "Quote a swap (same chain) or bridge (different chains) from the "
-            "CoinFello automation wallet through LI.FI, for comparing options. "
+            "CoinFello automation wallet, for comparing options. "
             "EXECUTES NOTHING and cannot be executed by reference: to trade, use "
             "coinfello_prepare_swap with the same arguments.",
             {
@@ -392,7 +392,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         _schema(
             "coinfello_prepare_swap",
             "Step 1 of a swap (same chain) or bridge (different chains) from the "
-            "CoinFello automation wallet: quotes it through LI.FI and stores it as "
+            "CoinFello automation wallet: quotes it and stores it as "
             "a single-use intent valid for about two minutes. EXECUTES NOTHING. "
             "Returns intent_id, the summary (amount in, minimum out, bridge, gas "
             "and fees) and a one-line description. Refused up front when the "
@@ -460,7 +460,7 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         _schema(
             "coinfello_transfer_status",
             "What a swap or bridge actually delivered, by its source transaction "
-            "hash (LI.FI status). outcome is pending, completed, wrong_token (it "
+            "hash. outcome is pending, completed, wrong_token (it "
             "finished but a different token arrived, e.g. WETH instead of POL), "
             "refunded (nothing arrived; the source token came back) or failed. "
             "Use this after every bridge instead of polling balances, which cannot "
