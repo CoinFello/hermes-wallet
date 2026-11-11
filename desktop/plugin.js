@@ -649,6 +649,8 @@ function Assets({ ctx, tab, setTab }) {
   }
   if (!data || data.ok === false) return null
   const networks = data.networks || []
+  // Network logos fall back to icons served by the same CoinFello deployment.
+  const appOrigin = originOf(data.portfolio_url)
   return jsxs('section', {
     className: 'cf-section',
     id: 'cf-panel-assets',

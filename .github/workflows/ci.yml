@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Nothing else renders desktop/plugin.js, so an undefined name (0.3.1's
+      # `appOrigin`) only failed once Hermes drew the pane.
+      - name: Lint the desktop pane for undefined names
+        run: npx --yes eslint@9.17.0 --no-config-lookup -c tests/eslint.undef.mjs desktop/plugin.js
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Tests (Python, plus the card bridge and pane lint through Node)
+        run: uv run --python 3.12 --with pytest --with segno --with fastapi --with pydantic --with httpx python -m pytest -q -p no:cacheprovider
