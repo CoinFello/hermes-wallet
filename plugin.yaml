@@ -5,15 +5,14 @@ version: "0.3.4"
 author: CoinFello
 homepage: https://github.com/CoinFello/hermes-wallet
 description: >
-  Hermes Wallet by CoinFello: sign in once with
-  `hermes auth add coinfello:coinfello` and your agent gets a CoinFello wallet
-  it can use onchain. It reads balances, positions, LP ranges, open orders,
-  activity, prices, yields and quotes, asks Fello, CoinFello's DeFi agent, to
-  research and plan, and prepares swaps, bridges and sends that you approve in
-  Hermes, inside a daily spending limit you set on CoinFello. Hermes stores the
-  sign-in; the plugin never sees a token. The desktop wallet pane covers
-  portfolio, activity, swap, send, earn, strategies and settings, and draws
-  the CoinFello cards the agent shows.
+  Hermes Wallet by CoinFello. All of DeFi, one conversation: swap, bridge,
+  lend, LP, trade perps, farm yield and run strategies on a schedule from your
+  own CoinFello wallet. Fello, CoinFello's DeFi agent, plans and stages each
+  step, and nothing runs until you approve CoinFello's summary of it in
+  Hermes, inside a daily spending limit CoinFello enforces. Sign in once with
+  `hermes auth add coinfello:coinfello`; Hermes stores the sign-in and the
+  plugin never sees a token. The desktop wallet pane covers portfolio,
+  activity, swap, send, earn, strategies and settings.
 requires_hermes: ">=0.23.0"
 provides_tools:
   - coinfello_status
