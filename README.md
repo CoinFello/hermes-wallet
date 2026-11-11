@@ -89,9 +89,10 @@ you approve it.
 
 - **Header:** the CoinFello logo (wordmark follows your theme's text colour),
   connection state, and a **Settings** gear.
-- **Home:** the automations wallet (address + copy), portfolio total and 24h
-  change, and Send / Swap / Receive (Receive shows the funding QR). Below that,
-  assets grouped by network and links to the full portfolio and strategies.
+- **Home:** the automations wallet card (address + copy, portfolio total and
+  24h change, Send / Swap / Earn / Receive, where Receive shows the funding
+  QR, and **Full portfolio** / **Strategies** right under them). Below that,
+  assets grouped by network and the wallet's activity.
   **Full portfolio** and **Strategies** open CoinFello's own views in Hermes
   tabs (main area) when the server offers them (`create_embed_token` with
   scope `portfolio` / `strategies`, both read-only, so read-only sessions can

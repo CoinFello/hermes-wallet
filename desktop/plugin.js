@@ -212,6 +212,7 @@ const STYLES = `
 .cf-link.is-soon { cursor: default; color: var(--ui-text-tertiary); border-style: dashed; }
 .cf-link.is-soon:hover { background: transparent; color: var(--ui-text-tertiary); }
 .cf-soon { font-size: 10.5px; color: var(--ui-text-quaternary); }
+.cf-hero-links { justify-content: center; margin-top: 14px; }
 
 .cf-subhead { display: flex; align-items: center; gap: 6px; min-height: 28px; }
 .cf-subhead-title { font-size: 14px; font-weight: 600; }
@@ -422,6 +423,32 @@ function blockedReason(data, verb) {
     : `${verb} from Hermes needs a CoinFello update`
 }
 
+/**
+ * Full portfolio and Strategies, in the wallet card under Send / Swap / Earn /
+ * Receive so every entry point is visible without scrolling. Each opens
+ * CoinFello's own view in a Hermes tab. No browser fallback: the web app
+ * reconnects a browser-extension wallet and can sign in as a different
+ * account. Until the server offers a view, its pill says it is coming; a
+ * server that offers it to a desktop too old for main-area tabs says to
+ * update Hermes instead.
+ */
+function ViewLinks({ ctx, portfolio }) {
+  const appOrigin = originOf(portfolio.portfolio_url)
+  const tabs = canOpenTabs()
+  const soon = (offered) => (offered && !tabs ? 'Update Hermes to open this' : 'Coming to Hermes soon')
+  const pill = (kind, label, offered) =>
+    tabs && offered
+      ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, kind), label })
+      : jsx(SoonPill, { label, note: soon(offered) })
+  return jsxs('div', {
+    className: 'cf-links cf-hero-links',
+    children: [
+      pill('portfolio', 'Full portfolio', portfolio.can_view_portfolio === true),
+      pill('strategies', 'Strategies', portfolio.can_view_strategies === true),
+    ],
+  })
+}
+
 function Hero({ ctx, onSend, onSwap, onEarn }) {
   const [showQr, setShowQr] = useState(false)
   const wallet = useWallet(ctx)
@@ -502,6 +529,7 @@ function Hero({ ctx, onSend, onSwap, onEarn }) {
           }),
         ],
       }),
+      p ? jsx(ViewLinks, { ctx, portfolio: p }) : null,
       p && p.earn_supported === false
         ? jsx('div', {
             className: 'cf-hint',
@@ -621,15 +649,6 @@ function Assets({ ctx, tab, setTab }) {
   }
   if (!data || data.ok === false) return null
   const networks = data.networks || []
-  const appOrigin = originOf(data.portfolio_url)
-  const tabs = canOpenTabs()
-  const portfolioInApp = tabs && data.can_view_portfolio === true
-  const strategiesInApp = tabs && data.can_view_strategies === true
-  // No browser fallback: the web app reconnects a browser-extension wallet and
-  // can sign in as a different account. Until the server offers a view, its
-  // pill says it is coming. A server that offers it to a desktop too old for
-  // main-area tabs says to update Hermes instead.
-  const soon = (offered) => (offered && !tabs ? 'Update Hermes to open this' : 'Coming to Hermes soon')
   return jsxs('section', {
     className: 'cf-section',
     id: 'cf-panel-assets',
@@ -707,17 +726,6 @@ function Assets({ ctx, tab, setTab }) {
             ].join(' ').trim(),
           })
         : null,
-      jsxs('div', {
-        className: 'cf-links',
-        children: [
-          portfolioInApp
-            ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'portfolio'), label: 'Full portfolio' })
-            : jsx(SoonPill, { label: 'Full portfolio', note: soon(data.can_view_portfolio === true) }),
-          strategiesInApp
-            ? jsx(TabPill, { onClick: () => openEmbedTab(ctx, appOrigin, 'strategies'), label: 'Strategies' })
-            : jsx(SoonPill, { label: 'Strategies', note: soon(data.can_view_strategies === true) }),
-        ],
-      }),
     ],
   })
 }

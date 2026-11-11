@@ -24,7 +24,7 @@ import urllib.request
 from typing import Callable, Mapping
 
 PROTOCOL_VERSION = "2025-06-18"
-CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.3.0"}
+CLIENT_INFO = {"name": "coinfello-hermes-plugin", "version": "0.3.1"}
 # Every request names the client the standard way. CoinFello's server reads it
 # for its own daily-activity analytics (the server is stateless, so it cannot
 # read clientInfo from initialize on later calls). Nothing else is sent for

@@ -1,7 +1,7 @@
 name: coinfello
 label: CoinFello
 kind: standalone
-version: 0.3.0
+version: 0.3.1
 author: CoinFello
 homepage: https://github.com/CoinFello/coinfello-hermes-plugin
 description: >
