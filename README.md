@@ -2,20 +2,49 @@
 
 ![Hermes Wallet by CoinFello](docs/banner.png)
 
-A Hermes Agent plugin that connects the agent to [CoinFello](https://coinfello.com)
-through the CoinFello MCP server: sign in once, and the agent gets fast reads
-over your automation wallet (balances, positions, LP ranges, open orders,
-activity, prices, yields, swap/bridge quotes) plus **Fello**, CoinFello's DeFi
-agent, which can execute on-chain actions for you.
+**All of DeFi. One conversation.** Swap, bridge, lend, LP, trade perps, farm
+yield, run strategies on a schedule. Hermes Wallet by CoinFello makes your
+agent the only DeFi interface you need: tell it what you want and it executes
+or automates it from your own wallet, inside a daily limit you set.
 
-Sign-in is Hermes's own OAuth: CoinFello is declared under `oauth:` in
-`plugin.yaml`, you run `hermes auth add coinfello:coinfello` once, and Hermes
-stores, refreshes and attaches the grant. The plugin never sees a token.
+You don't need a dozen tabs, a bookmark for every protocol and a prayer that
+the front end is still the real one. Tell your agent what you want. It finds
+the protocol, the chain and the route, shows you exactly what will happen,
+and does it from your own wallet. Want it every Monday, or only when ETH dips
+under $3k? Say that instead, and it keeps running after you close the chat.
 
-Includes a desktop pane: the sign-in command to copy, the automations wallet
-(copy + QR to fund it), balances per network shaped like the CoinFello
-Portfolio view, and CoinFello's MCP App cards (portfolio, quotes,
-automations, yields, ...) when the agent shows one.
+CoinFello is built by jacobc.eth, who was Lead Managing Director at MetaMask
+before he started CoinFello. That background shows in the parts you hope you
+never need, like the limits and the approvals.
+
+## Limits the wallet enforces
+
+A rule in a system prompt isn't a limit. The wallet has to enforce it.
+
+You give your agent a daily spending limit, and CoinFello checks it on every
+trade, so the agent can't go past it whatever it was told. Lowering the limit
+takes effect right away. Raising it needs you to approve the change in your
+browser. Hermes also asks before every step (unless you've turned approvals
+off), and the prompt shows CoinFello's own summary of it instead of whatever
+the model wrote.
+
+## Take it with you
+
+The wallet belongs to your CoinFello account, so it isn't stuck in Hermes.
+Sign in at coinfello.com and the same balances, positions and history are
+there. You can revoke the agent's access from CoinFello at any time and it
+ends right away.
+
+## How it connects
+
+The plugin talks to CoinFello's MCP server. Sign-in is Hermes's own OAuth:
+CoinFello is declared under `oauth:` in `plugin.yaml`, you run
+`hermes auth add coinfello:coinfello` once, and Hermes stores, refreshes and
+attaches the grant. The plugin never sees a token. The agent gets fast reads
+over your wallet (balances, positions, LP ranges, open orders, activity,
+prices, yields, quotes) and Fello, CoinFello's DeFi agent, for everything
+else. The desktop pane shows the wallet, and CoinFello's cards when the agent
+shows one.
 
 ## What you get
 
