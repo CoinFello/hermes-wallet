@@ -9,7 +9,7 @@ SRC="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p "$(dirname "$TARGET")"
 
 if [ -e "$TARGET" ]; then
-  echo "Already installed at $TARGET — reinstalling over it."
+  echo "Already installed at $TARGET; reinstalling over it."
   rsync -a --delete \
     --exclude .git/ --exclude __pycache__/ --exclude .pytest_cache/ \
     --exclude .venv/ --exclude '*.pyc' --exclude .coinfello-state.json --exclude '.coinfello-venues-*.json' \
@@ -28,5 +28,5 @@ echo "  2. Restart Hermes; the coinfello_* tools appear in every session."
 echo "  3. Sign in to CoinFello (once):"
 echo "       echo 'COINFELLO_OAUTH_CLIENT_ID=coinfello-hermes' >> \"\$(hermes config env-path)\""
 echo "       hermes auth add coinfello:coinfello"
-echo "  4. In the desktop app: ⌘K → Reload desktop plugins (the pane is opt-in;"
-echo "     flip it on under Capabilities → Plugins)."
+echo "  4. In the desktop app: Ctrl+K (Cmd+K on macOS), Reload desktop plugins (the pane is opt-in;"
+echo "     flip it on under Capabilities, Plugins)."
