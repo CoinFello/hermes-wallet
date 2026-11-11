@@ -76,6 +76,59 @@ BASE_TOOLS = (
 )
 
 ACTION_TOOLS = ("prepare_send", "prepare_swap", "execute_intent", "create_embed_token")
+
+# fello_chat with stage_actions stages Fello's
+# fund-moving tool calls as 10-minute single-use intents.
+STAGED_SPEND = "88888888-8888-4888-8888-888888888888"
+STAGED_RETURNS = "99999999-9999-4999-8999-999999999999"
+STAGED_UNPRICED = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+STAGED_IDS = (STAGED_SPEND, STAGED_RETURNS, STAGED_UNPRICED)
+FELLO_CHAT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+STAGED_NOTE = ("Fello staged these actions instead of running them. Show the human each "
+               "summary and, only for the ones they confirm, call execute_intent with its "
+               "intent_id.")
+
+
+def _expires_at(seconds=600):
+    moment = time.gmtime(time.time() + seconds)
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", moment)
+
+
+def staged_actions():
+    return [
+        {"intent_id": STAGED_SPEND, "tool": "enter_staking_yield",
+         "summary": "Stake 0.5 ETH on Lido (Ethereum)", "effect": "spend", "usd": 1234.56,
+         "expires_at": _expires_at()},
+        {"intent_id": STAGED_RETURNS, "tool": "hyperliquid_close_position",
+         "summary": "Close the ETH perp on Hyperliquid", "effect": "returns", "usd": 0,
+         "expires_at": _expires_at()},
+        {"intent_id": STAGED_UNPRICED, "tool": "polymarket_place_bet",
+         "summary": "Bet on a Polymarket market", "effect": "spend", "usd": None,
+         "expires_at": _expires_at()},
+    ]
+
+
+def fello_reply(staged):
+    reply = {"status": "done", "reply": "Staged for you." if staged else "Here is my plan.",
+             "chat_id": FELLO_CHAT_ID, "staged_actions": staged}
+    if staged:
+        reply["staged_note"] = STAGED_NOTE
+    return reply
+
+
+STAGED_EXECUTED = {
+    "success": True, "kind": "action", "tool": "enter_staking_yield",
+    "transactionHash": "0x" + "b2" * 32,
+    "transactionHashes": ["0x" + "a1" * 32, "0x" + "b2" * 32],
+    "details": {"position": "stETH"},
+    "next": "Tell Fello the result with fello_chat on the same chat_id so it can continue.",
+}
+STAGED_NEEDS_PERMISSION = {
+    "success": False, "kind": "action", "tool": "hyperliquid_close_position",
+    "needsPermission": True,
+    "error": "The automation wallet has no permission. Nothing was signed.",
+    "next": "Ask the human to turn on the automation wallet in CoinFello.",
+}
 # Added after a bridge incident.
 STATUS_TOOLS = ("get_transfer_status",)
 
@@ -454,6 +507,13 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                         if tool["name"] == "create_embed_token":
                             tool["inputSchema"] = {"type": "object", "properties": {
                                 "scope": scope, "session_token": {"type": "string"}}}
+            if self.state["staging"]:
+                for tool in tools:
+                    if tool["name"] == "fello_chat":
+                        tool["inputSchema"] = {"type": "object", "properties": {
+                            "message": {"type": "string"}, "chat_id": {"type": "string"},
+                            "stage_actions": {"type": "boolean"},
+                            "session_token": {"type": "string"}}}
             if self.state["limit_mode"]:
                 tools += [{"name": name, "inputSchema": {"type": "object"}}
                           for name in ("set_daily_limit", "start_limit_change", "get_limit_change")]
@@ -573,6 +633,18 @@ class MockMCPHandler(BaseHTTPRequestHandler):
         if name == "get_transfer_status" and state["transfer_status"]:
             self._json(200, _rpc_response(message_id, _tool_result(TRANSFER_WRONG_TOKEN)))
             return
+        if name == "fello_chat":
+            staged = staged_actions() if arguments.get("stage_actions") else []
+            if state["chat_running"]:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    {"status": "running", "job_id": "job-1", "next": "Poll fello_job_status."})))
+                return
+            self._json(200, _rpc_response(message_id, _tool_result(fello_reply(staged))))
+            return
+        if name == "fello_job_status":
+            self._json(200, _rpc_response(message_id, _tool_result(
+                fello_reply(staged_actions() if state["staging"] else []))))
+            return
         if name == "execute_intent" and state["actions"]:
             intent = arguments.get("intent_id")
             if intent in state["used_intents"]:
@@ -580,6 +652,18 @@ class MockMCPHandler(BaseHTTPRequestHandler):
                     "This confirmation expired or was already used. Prepare it again.", error=True)))
                 return
             state["used_intents"].append(intent)
+            if intent == STAGED_SPEND:
+                self._json(200, _rpc_response(message_id, _tool_result(STAGED_EXECUTED)))
+                return
+            if intent == STAGED_RETURNS:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    STAGED_NEEDS_PERMISSION, error=True)))
+                return
+            if intent == STAGED_UNPRICED:
+                self._json(200, _rpc_response(message_id, _tool_result(
+                    "CoinFello could not price this action in USD, so it cannot fit this "
+                    "session's daily limit. Nothing was sent.", error=True)))
+                return
             if state["outcome_unknown"]:
                 self._json(200, _rpc_response(message_id, _tool_result(
                     {"success": False, "kind": "swap", "outcomeUnknown": True,
@@ -759,6 +843,9 @@ def mock_mcp(monkeypatch):
         "price_moved": False,
         "route_changed": False,
         "outcome_unknown": False,
+        # fello_chat advertises stage_actions.
+        "staging": False,
+        "chat_running": False,
         # The Earn embed: None = create_embed_token without `scope` (production
         # before it ships); a list = `scope` with that enum; () = no enum.
         "embed_scopes": None,

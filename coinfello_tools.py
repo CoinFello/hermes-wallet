@@ -112,15 +112,18 @@ def _chat(args: dict) -> Any:
         raise ValueError("message is required")
     if args.get("chat_id"):
         payload["chat_id"] = str(args["chat_id"]).strip()
-    result = core.call("fello_chat", payload, timeout=180.0)
-    return result
+    # Fello stages fund-moving actions for coinfello_execute instead of
+    # refusing them; an older server never advertised the flag.
+    if core.accepts_param("fello_chat", "stage_actions"):
+        payload["stage_actions"] = True
+    return trades.remember_staged(core.call("fello_chat", payload, timeout=180.0))
 
 
 def _job_status(args: dict) -> Any:
     job_id = str(args.get("job_id") or "").strip()
     if not job_id:
         raise ValueError("job_id is required")
-    return core.call("fello_job_status", {"job_id": job_id})
+    return trades.remember_staged(core.call("fello_job_status", {"job_id": job_id}))
 
 
 def _read(tool_name: str):
@@ -269,19 +272,22 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         _schema(
             "coinfello_chat",
             "Send a message to Fello, CoinFello's DeFi agent, acting for the signed-in "
-            "account. Fello can research AND EXECUTE on-chain actions from the "
-            "automation wallet without further confirmation: staking, verified "
-            "contract calls, Hyperliquid perps, Polymarket, and anything else the "
-            "other coinfello_* tools do not cover. Hermes shows the human each "
-            "message for approval before it is sent. For a swap, bridge or token "
-            "send use coinfello_prepare_swap / coinfello_prepare_send and "
-            "coinfello_execute instead: Fello plans a trade described in prose "
-            "itself and may route it differently from any quote. Never use this to "
-            "\"execute\" a quote, and never start a follow-up trade (e.g. to repair "
-            "a bad result) without the human asking for it. Returns Fello's reply "
-            "and a chat_id (pass it back to continue the conversation). A turn can "
-            "take minutes: status \"running\" means poll coinfello_job_status with "
-            "the job_id.",
+            "account: research, planning, and the actions the other coinfello_* "
+            "tools do not cover (staking and yield, Hyperliquid perps, Polymarket, "
+            "LP positions, hedges, pausing or cancelling automations). Hermes shows "
+            "the human each message for approval before it is sent. Fello does not "
+            "run fund-moving actions here: it STAGES them, and the reply lists them "
+            "in staged_actions (intent_id, summary, effect, usd, expires_at). "
+            "Nothing staged has run: show the human each summary and call "
+            "coinfello_execute with its intent_id only for the ones they agree to; "
+            "a spend with usd null will be refused. For a plain swap, bridge or "
+            "token send prefer coinfello_prepare_swap / coinfello_prepare_send. "
+            "Never use this to \"execute\" a quote, and never start a follow-up "
+            "trade (e.g. to repair a bad result) without the human asking for it. "
+            "Returns Fello's reply, a chat_id (pass it back to continue the "
+            "conversation, e.g. to tell Fello what an executed action did) and "
+            "staged_actions. A turn can take minutes: status \"running\" means "
+            "poll coinfello_job_status with the job_id.",
             {
                 "message": {**_STRING, "description": "What you want Fello to do or answer"},
                 "chat_id": {**_STRING, "description": "chat_id from a previous reply, to continue that conversation"},
@@ -295,7 +301,10 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         _schema(
             "coinfello_job_status",
             "Poll a coinfello_chat turn that returned status \"running\". Returns "
-            "running (call again in 20-30 seconds), done with Fello's reply, or error.",
+            "running (call again in 20-30 seconds), done with Fello's reply, "
+            "chat_id and staged_actions exactly as coinfello_chat would (nothing "
+            "staged has run: show the human each summary, then coinfello_execute "
+            "the ones they agree to), or error.",
             {"job_id": {**_STRING, "description": "job_id from the running reply"}},
             ("job_id",),
         ),
@@ -426,13 +435,22 @@ _COINFELLO_TOOLS: tuple[tuple[str, dict, Handler], ...] = (
         "coinfello_execute",
         _schema(
             "coinfello_execute",
-            "Step 2: executes a prepared swap, bridge or send ON-CHAIN, exactly as "
-            "prepared. Hermes first shows the human the prepared summary and runs "
-            "it only if they approve; a denial means stop, not retry. Each intent "
-            "runs once. price_moved or route_changed means nothing was sent: "
-            "prepare again. A successful bridge confirms only the source chain: "
-            "follow up with coinfello_transfer_status.",
-            {"intent_id": {**_STRING, "description": "intent_id from coinfello_prepare_swap or coinfello_prepare_send"}},
+            "Step 2: executes a prepared swap, bridge or send, or an action Fello "
+            "staged in a coinfello_chat / coinfello_job_status reply, ON-CHAIN "
+            "exactly as prepared or staged. Hermes first shows the human the "
+            "server's summary and runs it only if they approve; a denial means "
+            "stop, not retry. Each intent runs once; prepared ones expire after "
+            "two minutes, staged ones at expires_at. price_moved or route_changed "
+            "means nothing was sent: prepare again. A successful bridge confirms "
+            "only the source chain: follow up with coinfello_transfer_status. A "
+            "staged action returns kind \"action\" with tool, transaction_hashes, "
+            "outcome_unknown (may have gone through: never retry), "
+            "needs_permission, error and next: follow next (its fello_chat is "
+            "coinfello_chat here, on the same chat_id).",
+            {"intent_id": {**_STRING, "description": (
+                "intent_id from coinfello_prepare_swap, coinfello_prepare_send or a "
+                "staged_actions entry"
+            )}},
             ("intent_id",),
         ),
         _execute,

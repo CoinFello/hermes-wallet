@@ -8,9 +8,12 @@ approve ``coinfello_execute`` with the SERVER's summary of that intent, cached
 here when it was prepared, never text the model wrote. An intent this process
 did not prepare is refused outright.
 
-``coinfello_chat`` is gated the same way, showing the exact message: Fello
-can act on-chain from any message without asking again, so a human sees each
-one before it is sent.
+``coinfello_chat`` asks the server to STAGE the fund-moving actions Fello
+would take (``stage_actions``): each comes back as a
+single-use intent with a server-built summary, registered here exactly like a
+prepared one, so ``coinfello_execute`` shows the human that summary (and its
+USD and effect) before it runs. The chat itself is gated too, showing the
+exact message, so a human sees each one before it is sent.
 
 After a bridge, ``transfer_status`` says what actually arrived (LI.FI's
 status, folded into one ``outcome``): a bridge can finish refunded, or
@@ -23,6 +26,7 @@ import hashlib
 import json
 import threading
 import time
+from datetime import datetime, timezone
 import urllib.error
 import urllib.request
 from typing import Any
@@ -35,9 +39,15 @@ except ImportError:  # pragma: no cover
 #: Server-side intents expire after 120 s; keep ours a little shorter so the
 #: approval prompt never shows something the server will refuse as expired.
 INTENT_TTL_FALLBACK_SECONDS = 110
+#: A staged fello_chat action lasts ten minutes on the server.
+STAGED_TTL_SECONDS = 600
+STAGED_EFFECTS = ("spend", "returns", "automation", "other")
 LIFI_STATUS_URL = "https://li.quest/v1/status"
 
 _intents: dict[str, dict[str, Any]] = {}
+#: Intents this process executed: a later poll of the same finished job
+#: lists them again, and they must not be offered for approval twice.
+_spent: set[str] = set()
 _intents_lock = threading.Lock()
 
 
@@ -76,6 +86,89 @@ def intent_seconds_left(intent_id: str) -> int:
 def forget_intent(intent_id: str) -> None:
     with _intents_lock:
         _intents.pop(intent_id, None)
+        _spent.add(intent_id)
+
+
+def _seconds_until(iso: Any) -> float | None:
+    if not isinstance(iso, str) or not iso.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(iso.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (moment - datetime.now(timezone.utc)).total_seconds()
+
+
+def _staged_summary(action: Any) -> tuple[str, dict, float] | None:
+    """(intent_id, summary, seconds left) for one well-formed staged action,
+    or None: without the server's own summary there is nothing to approve."""
+    if not isinstance(action, dict):
+        return None
+    intent_id = action.get("intent_id")
+    text = action.get("summary")
+    if not isinstance(intent_id, str) or not intent_id.strip():
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    usd = action.get("usd")
+    if isinstance(usd, bool) or not isinstance(usd, (int, float)):
+        usd = None
+    effect = action.get("effect") if action.get("effect") in STAGED_EFFECTS else "other"
+    left = _seconds_until(action.get("expires_at"))
+    seconds = float(STAGED_TTL_SECONDS) if left is None else min(left, float(STAGED_TTL_SECONDS))
+    summary = {
+        "kind": "turn",
+        "tool": str(action.get("tool") or ""),
+        "summary": text.strip(),
+        "effect": effect,
+        "usd": usd,
+    }
+    return intent_id.strip(), summary, seconds
+
+
+def remember_staged(reply: Any) -> Any:
+    """Register the actions a fello_chat / fello_job_status reply staged, with
+    the SERVER's summaries, and tell the agent how to run them. Returns the
+    reply with ``staged_actions`` rewritten for this plugin's tools."""
+    if not isinstance(reply, dict) or not isinstance(reply.get("staged_actions"), list):
+        return reply
+    surfaced = []
+    for action in reply["staged_actions"]:
+        staged = _staged_summary(action)
+        if staged is None:
+            continue
+        intent_id, summary, seconds = staged
+        with _intents_lock:
+            spent = intent_id in _spent
+        if spent or seconds <= 10:
+            continue
+        # remember_intent keeps ten seconds in hand, as for prepared intents.
+        remember_intent(intent_id, summary, seconds)
+        surfaced.append({
+            "intent_id": intent_id,
+            "tool": summary["tool"],
+            "summary": summary["summary"],
+            "effect": summary["effect"],
+            "usd": summary["usd"],
+            "expires_at": action.get("expires_at"),
+            "description": describe(summary),
+        })
+    result = {k: v for k, v in reply.items() if k != "staged_note"}
+    result["staged_actions"] = surfaced
+    if surfaced:
+        result["next"] = (
+            "Fello staged these actions; NOTHING has run. Show the human each "
+            "summary (with its usd and effect). Only for the ones they agree "
+            "to, call coinfello_execute with that intent_id: Hermes asks them "
+            "to approve it again, and a denial means stop. Each runs once and "
+            "expires at expires_at. A spend with usd null could not be priced "
+            "and will be refused; ask Fello for a form with an explicit token "
+            "amount. After running one, tell Fello the result with "
+            "coinfello_chat on the same chat_id so it can continue the plan."
+        )
+    return result
 
 
 # -- human-readable summaries -----------------------------------------------
@@ -87,9 +180,34 @@ def _usd(value: Any) -> str | None:
         return None
 
 
+_EFFECT_TEXT = {
+    "returns": "Returns funds to the wallet; not charged to the daily limit.",
+    "automation": "Changes an automation (only less can run); not charged to the daily limit.",
+    "other": "Not charged to the daily limit.",
+}
+
+
+def _describe_staged(summary: dict) -> str:
+    text = str(summary.get("summary") or "").strip().rstrip(".") + "."
+    tool = summary.get("tool")
+    staged = f" Staged by Fello ({tool})." if tool else " Staged by Fello."
+    if summary.get("effect") == "spend":
+        value = _usd(summary.get("usd")) if summary.get("usd") is not None else None
+        cost = (
+            f"Spends ~{value}, charged to the daily limit."
+            if value
+            else "CoinFello could not price it, so it will be refused."
+        )
+    else:
+        cost = _EFFECT_TEXT.get(str(summary.get("effect")), _EFFECT_TEXT["other"])
+    return f"{text}{staged} {cost}"
+
+
 def describe(summary: dict) -> str:
     """One plain sentence for the approval prompt, from the server summary."""
     kind = summary.get("kind")
+    if kind == "turn":
+        return _describe_staged(summary)
     if kind == "send":
         token = (summary.get("token") or {}).get("symbol") or "?"
         value = _usd(summary.get("valueUsd"))
@@ -187,6 +305,16 @@ def execute(intent_id: str) -> dict:
     forget_intent(intent_id)
     result = core.execute_intent(intent_id)
     result["summary"] = describe(summary)
+    if summary.get("kind") == "turn":
+        if not result.get("next"):
+            result["next"] = (
+                "Tell the human what happened, then tell Fello the result with "
+                "coinfello_chat on the same chat_id."
+                if result.get("ok") or result.get("outcome_unknown") or result.get("transaction_hash")
+                else "Tell the human it did not run and why. Do not retry "
+                "without asking Fello again and the human's approval."
+            )
+        return result
     if result.get("ok") and summary.get("kind") == "bridge" and result.get("transaction_hash"):
         result["next"] = (
             "Only the source chain is confirmed. Call coinfello_transfer_status "
@@ -214,14 +342,31 @@ def approval_directive(tool_name: str, args: dict | None) -> dict | None:
                 "action": "block",
                 "message": (
                     "coinfello_execute refused: that intent_id was not prepared "
-                    "in this session, or it expired (intents last two minutes). "
-                    "Call coinfello_prepare_swap / coinfello_prepare_send again, "
-                    "show the human the summary, then execute the new intent_id."
+                    "in this session, or it expired (prepared intents last two "
+                    "minutes, staged Fello actions ten). Call "
+                    "coinfello_prepare_swap / coinfello_prepare_send (or ask "
+                    "Fello with coinfello_chat) again, show the human the "
+                    "summary, then execute the new intent_id."
                 ),
             }
+        if summary.get("kind") == "turn" and summary.get("effect") == "spend" \
+                and summary.get("usd") is None:
+            return {
+                "action": "block",
+                "message": (
+                    "coinfello_execute refused: CoinFello could not price this "
+                    "staged action in USD, so the server would refuse it. Ask "
+                    "Fello to stage it with an explicit token amount."
+                ),
+            }
+        where = (
+            "CoinFello, from your automation wallet: "
+            if summary.get("kind") == "turn"
+            else "CoinFello, ON-CHAIN from your automation wallet: "
+        )
         return {
             "action": "approve",
-            "message": "CoinFello, ON-CHAIN from your automation wallet: " + describe(summary),
+            "message": where + describe(summary),
             # One grain per intent: an [a]lways answer can never cover another
             # trade, and an intent only runs once anyway.
             "rule_key": f"coinfello_execute:{intent_id}",

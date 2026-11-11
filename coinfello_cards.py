@@ -719,7 +719,7 @@ def summary_rows(summary: dict) -> list[list[str]]:
 
 
 def describe_summary(summary: dict) -> str:
-    if summary.get("kind") in ("send", "swap", "bridge"):
+    if summary.get("kind") in ("send", "swap", "bridge", "turn"):
         return trades.describe(summary)
     kind = str(summary.get("kind") or "action").replace("_", " ")
     return f"Run this {kind} from your automations wallet, exactly as prepared."

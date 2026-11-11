@@ -679,6 +679,7 @@ def execute_intent(intent_id: str) -> dict:
                 "outcome_unknown": bool(detail.get("outcomeUnknown")),
                 "transaction_hash": detail.get("transactionHash"),
                 "explorer_url": explorer_url(detail.get("transactionHash")),
+                **_action_fields(detail),
             }
         return {"ok": False, "error": text}
     if not isinstance(result, dict):
@@ -689,7 +690,29 @@ def execute_intent(intent_id: str) -> dict:
         "transaction_hash": result.get("transactionHash"),
         "explorer_url": explorer_url(result.get("transactionHash")),
         "error": result.get("error"),
+        **_action_fields(result),
     }
+
+
+def _action_fields(result: dict) -> dict:
+    """The extra fields of a staged fello_chat action's result (kind
+    'action'): the tool it ran, every hash, and the server's ``next``."""
+    if result.get("kind") != "action":
+        return {}
+    hashes = [h for h in result.get("transactionHashes") or [] if isinstance(h, str)]
+    fields: dict[str, Any] = {
+        "kind": "action",
+        "tool": result.get("tool"),
+        "transaction_hashes": hashes,
+        "explorer_urls": [url for url in map(explorer_url, hashes) if url],
+        "outcome_unknown": bool(result.get("outcomeUnknown")),
+        "needs_permission": bool(result.get("needsPermission")),
+    }
+    if result.get("details") is not None:
+        fields["details"] = result["details"]
+    if isinstance(result.get("next"), str):
+        fields["next"] = result["next"]
+    return fields
 
 
 def explorer_url(transaction_hash: Any) -> str | None:

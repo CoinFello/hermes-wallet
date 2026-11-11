@@ -26,12 +26,12 @@ automations, yields, ...) when the agent shows one.
 | `coinfello_poll_approval` | Finish sign-in once the human approved in the browser |
 | `coinfello_verify` | Email-code sign-in, only for servers without browser sign-in |
 | `coinfello_disconnect` | Revoke the session now |
-| `coinfello_chat` | Ask Fello to do something (can EXECUTE; each message needs your approval) |
-| `coinfello_job_status` | Poll a running Fello turn |
+| `coinfello_chat` | Ask Fello to do something; it stages fund-moving actions for `coinfello_execute` (each message needs your approval) |
+| `coinfello_job_status` | Poll a running Fello turn (its reply lists staged actions too) |
 | `coinfello_balances` / `_positions` / `_lp_positions` / `_open_orders` / `_activity` | Wallet reads |
 | `coinfello_quote` | Swap/bridge quote, for comparing (executes nothing, not executable by reference) |
 | `coinfello_prepare_swap` / `coinfello_prepare_send` | Validate, price and hold a trade as a 2-minute single-use intent (executes nothing) |
-| `coinfello_execute` | Run a prepared intent ON-CHAIN, only after you approve its summary in Hermes |
+| `coinfello_execute` | Run a prepared intent or a staged Fello action, only after you approve its summary in Hermes |
 | `coinfello_transfer_status` | What a swap/bridge actually delivered: completed, wrong_token, refunded, failed |
 | `coinfello_yields` / `_prices` | Market reads |
 | `coinfello_show_card` | Show a CoinFello card: drawn in the desktop pane; other surfaces get its text |
@@ -143,8 +143,35 @@ off the Automation Wallet in the CoinFello app ends it too.
    delivering WETH instead of native POL) and `refunded` are failures to
    report, not to repair with another trade.
 
-`coinfello_chat` gets the same prompt for every message, since Fello can act
-on any of them without asking again.
+`coinfello_chat` gets the same prompt for every message.
+
+### Actions Fello stages
+
+Everything else (staking and yield, Hyperliquid perps, Polymarket, LP
+positions, hedges, pausing or cancelling an automation) goes through Fello.
+On servers that offer it, `coinfello_chat` asks Fello to
+**stage** those actions instead of running them:
+
+1. The reply (from `coinfello_chat`, or `coinfello_job_status` for a long
+   turn) lists `staged_actions`: an `intent_id`, the **server's** summary
+   (built from the arguments, never from Fello's prose), its `effect`
+   (`spend`, `returns`, `automation` or `other`), `usd` and `expires_at`
+   (ten minutes). Nothing has run.
+2. The plugin registers each one with that summary. The agent shows you the
+   summaries and calls `coinfello_execute` with an `intent_id` you agreed to.
+   Hermes' approval prompt shows the server's summary with what it costs,
+   e.g. *Stake 0.5 ETH on Lido. Staged by Fello (enter_staking_yield). Spends
+   ~$1,234.56, charged to the daily limit.* One rule key per intent, so an
+   "always" answer never covers another action.
+3. The result says which tool ran, its transaction hashes, and whether the
+   outcome is unknown (may have gone through: never retry) or the wallet
+   needs its automation permission. The agent then tells Fello the result on
+   the same `chat_id` so it can continue a multi-step plan.
+
+A spend CoinFello could not price (`usd: null`) is blocked before any prompt:
+the server would refuse it. An `intent_id` that did not come from this Hermes
+(a prepare or a staged reply) is refused outright, as before. Older servers
+never see the `stage_actions` flag.
 
 Approvals follow your Hermes settings: `--yolo` or **Approvals: off** skip
 the prompt for these tools too, and non-interactive runs (cron, `-q`) are

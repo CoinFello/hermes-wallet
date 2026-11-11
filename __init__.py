@@ -3,7 +3,7 @@
 Signs in with Hermes's own OAuth (`hermes auth add coinfello:coinfello`; the
 plugin never holds a token) and exposes the automation wallet to the agent: fast reads
 (balances, positions, prices, yields, quotes) and Fello, CoinFello's DeFi
-agent, which can execute on-chain actions.
+agent, which stages on-chain actions for the human to approve.
 
 Wiring goes only through the public plugin API (``ctx.register_tool`` and
 ``ctx.register_hook``). The ``pre_tool_call`` hook sends every tool call that
